@@ -15,8 +15,7 @@ const renderVS = `
 
     void main(){
         v_uv = a_uv;
-        vec4 encodedHeight = texture2D(u_heightMap, v_uv);
-        float height = decodeFloatRGBA(encodedHeight); 
+        float height = texture2D(u_heightMap, v_uv).r; 
         vec3 displacedPosition = a_position + vec3(0.0, height * 0.5, 0.0);
         gl_Position = u_mvp * vec4(displacedPosition, 1.0);
     }
@@ -42,10 +41,10 @@ const renderFS = `
         float b = 220.0/255.0;
 
         // Decode the height of neighboring textels
-        float hL = decodeFloatRGBA(texture2D(u_heightMap, v_uv - vec2(u_pixelSize.x, 0.0)));
-        float hR = decodeFloatRGBA(texture2D(u_heightMap, v_uv + vec2(u_pixelSize.x, 0.0)));
-        float hD = decodeFloatRGBA(texture2D(u_heightMap, v_uv - vec2(0.0, u_pixelSize.y)));
-        float hU = decodeFloatRGBA(texture2D(u_heightMap, v_uv + vec2(0.0, u_pixelSize.y)));
+        float hL = texture2D(u_heightMap, v_uv - vec2(u_pixelSize.x, 0.0)).r;
+        float hR = texture2D(u_heightMap, v_uv + vec2(u_pixelSize.x, 0.0)).r;
+        float hD = texture2D(u_heightMap, v_uv - vec2(0.0, u_pixelSize.y)).r;
+        float hU = texture2D(u_heightMap, v_uv + vec2(0.0, u_pixelSize.y)).r;
 
         vec3 normal = normalize(vec3(hL - hR, 2.0 / (10.0 / 128.0), hD - hU));
 
@@ -91,28 +90,35 @@ const simulationFS = `
 
     void main() {
         vec4 currentState = texture2D(u_state, v_uv);
-        float currentHeight = decodeFloatRGBA(currentState);
-        float previousHeight = currentHeight;
-        float neighborsHeight = (
-            decodeFloatRGBA(texture2D(u_state, v_uv + vec2(u_pixelSize.x, 0.0))) +
-            decodeFloatRGBA(texture2D(u_state, v_uv - vec2(u_pixelSize.x, 0.0))) +
-            decodeFloatRGBA(texture2D(u_state, v_uv + vec2(0.0, u_pixelSize.y))) +
-            decodeFloatRGBA(texture2D(u_state, v_uv - vec2(0.0, u_pixelSize.y)))
-        ) * 0.25;
+        vec4 prevState = texture2D(u_state, v_uv);
+        float currentHeight = prevState.r;
+        float previousHeight = prevState.g;
+        // Consider all neighbors to have a spheric wave
+        float N = texture2D(u_state, v_uv + vec2(0.0, u_pixelSize.y)).r;
+        float S = texture2D(u_state, v_uv - vec2(0.0, u_pixelSize.y)).r;
+        float E = texture2D(u_state, v_uv + vec2(u_pixelSize.x, 0.0)).r;
+        float W = texture2D(u_state, v_uv - vec2(u_pixelSize.x, 0.0)).r;
+        float NE = texture2D(u_state, v_uv + u_pixelSize).r;
+        float NW = texture2D(u_state, v_uv + vec2(-u_pixelSize.x, u_pixelSize.y)).r;
+        float SE = texture2D(u_state, v_uv + vec2(u_pixelSize.x, -u_pixelSize.y)).r;
+        float SW = texture2D(u_state, v_uv - u_pixelSize).r;
+
+        float neighborsHeight = (N + S + E + W + NE + NW + SE + SW) / 8.0;
+
 
         // Wave equation (Verlet integration)
-        float newHeight = (2.0 * currentHeight - previousHeight) + (neighborsHeight - currentHeight) * 2.0;
+        float newHeight = (2.0 * currentHeight - previousHeight) + (neighborsHeight - currentHeight) * 1.5;
         
         // Damping
         newHeight *= u_damping;
 
         // External force (mouse)        
         float dist = distance(v_uv, u_mousePos);
-        if (dist < 0.02) {
-            newHeight += u_mouseForce * (1.0 - dist / 0.02);
+        if (dist < 0.05) {
+            newHeight += u_mouseForce * smoothstep(0.05, 0.0,dist);
         }
 
-        gl_FragColor = encodeFloatRGBA(newHeight);  // New state
+        gl_FragColor = vec4(newHeight, currentHeight, 0.0, 1.0);  // New state
     }
 `;
 
@@ -150,9 +156,16 @@ if (!gl) {
 	throw new Error("[INIT] Unable to initialize WebGL. Your browser or machine may not support it.");
 }
 
+// Extensions for FBO
+const floatLinearExt = gl.getExtension('OES_textrue_float_linear');
+const floatTextrueExt = gl.getExtension('OES_texture_float');
+if(!floatTextrueExt){
+    throw new Error("[INIT] Unable to add float textrue. Your browser or machine may not support it.");
+}
+
 // Variables to control camera
-let rotX = 0.3;
-let rotY = -0.3;
+let rotX = 0.5;
+let rotY = -0.5;
 let isMouseDown = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
@@ -225,8 +238,8 @@ const simUniforms = {
 
 // FBO setup for simulation
 const simResolution = 256;
-let stateA = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.UNSIGNED_BYTE);
-let stateB = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.UNSIGNED_BYTE);
+let stateA = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.FLOAT);
+let stateB = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.FLOAT);
 
 
 // Event listeners 
@@ -234,7 +247,7 @@ canvas.addEventListener('mousedown', (e) =>{
     isMouseDown = true;
     lastMouseX = e.clientX;
     lastMouseY = e.clientY;
-    mouseForce = 0.1;   // Apply force when clicking
+    mouseForce = 0.5;   // Apply force when clicking
 });
 canvas.addEventListener('mouseup', () =>{
     isMouseDown = false;
@@ -273,7 +286,7 @@ function render(){
     gl.uniform2f(simUniforms.pixelSize, 1 / simResolution, 1 / simResolution);
     gl.uniform2fv(simUniforms.mousePos, mousePos);
     gl.uniform1f(simUniforms.mouseForce, mouseForce);
-    gl.uniform1f(simUniforms.damping, 0.995);
+    gl.uniform1f(simUniforms.damping, 0.985);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
     gl.enableVertexAttribArray(simAttribs.position);
