@@ -7,9 +7,16 @@ const renderVS = `
     attribute vec2 a_uv;
     uniform sampler2D u_heightMap; // Textrure with wawes height
     varying vec2 v_uv;
+
+    // To decode a float from 4 channels to 8-bit
+    float decodeFloatRGBA(vec4 rgba) {
+        return dot(rgba, vec4(1.0, 1.0/255.0, 1.0/65025.0, 1.0/16581375.0));
+    }
+
     void main(){
         v_uv = a_uv;
-        float height = texture2D(u_heightMap, v_uv).r; 
+        vec4 encodedHeight = texture2D(u_heightMap, v_uv);
+        float height = decodeFloatRGBA(encodedHeight); 
         vec3 displacedPosition = a_position + vec3(0.0, height * 0.5, 0.0);
         gl_Position = u_mvp * vec4(displacedPosition, 1.0);
     }
@@ -22,15 +29,23 @@ const renderFS = `
     uniform sampler2D u_heightMap;
     uniform vec2 u_pixelSize;
     uniform vec3 u_lightDir;
+
+    // To decode a float from 4 channels to 8-bit
+    float decodeFloatRGBA(vec4 rgba) {
+        return dot(rgba, vec4(1.0, 1.0/255.0, 1.0/65025.0, 1.0/16581375.0));
+    }
+
     void main(){
         // Water colour rgb(143, 240, 220) - [Source 1]
         float r = 143.0/255.0;
         float g = 240.0/255.0;
         float b = 220.0/255.0;
-        float hL = texture2D(u_heightMap, v_uv - vec2(u_pixelSize.x, 0.0)).r;
-        float hR = texture2D(u_heightMap, v_uv + vec2(u_pixelSize.x, 0.0)).r;
-        float hD = texture2D(u_heightMap, v_uv - vec2(0.0, u_pixelSize.y)).r;
-        float hU = texture2D(u_heightMap, v_uv + vec2(0.0, u_pixelSize.y)).r;
+
+        // Decode the height of neighboring textels
+        float hL = decodeFloatRGBA(texture2D(u_heightMap, v_uv - vec2(u_pixelSize.x, 0.0)));
+        float hR = decodeFloatRGBA(texture2D(u_heightMap, v_uv + vec2(u_pixelSize.x, 0.0)));
+        float hD = decodeFloatRGBA(texture2D(u_heightMap, v_uv - vec2(0.0, u_pixelSize.y)));
+        float hU = decodeFloatRGBA(texture2D(u_heightMap, v_uv + vec2(0.0, u_pixelSize.y)));
 
         vec3 normal = normalize(vec3(hL - hR, 2.0 / (10.0 / 128.0), hD - hU));
 
@@ -61,30 +76,43 @@ const simulationFS = `
     uniform float u_mouseForce;
     uniform float u_damping;
 
+    // Decodes a vec4 (RGBA) into a float
+    float decodeFloatRGBA(vec4 rgba) {
+        return dot(rgba, vec4(1.0, 1.0/255.0, 1.0/65025.0, 1.0/16581375.0));
+    }
+
+    // Encodes a float to a RGBA (vec4)
+    vec4 encodeFloatRGBA(float v) {
+        vec4 enc = vec4(1.0, 255.0, 65025.0, 16581375.0) * v;
+        enc = fract(enc);
+        enc -= enc.yzww * vec4(1.0/255.0, 1.0/255.0, 1.0/255.0, 0.0);
+        return enc;
+    }
+
     void main() {
         vec4 currentState = texture2D(u_state, v_uv);
-        float currentHeight = currentState.r;
-        float previousHeight = currentState.g;
+        float currentHeight = decodeFloatRGBA(currentState);
+        float previousHeight = currentHeight;
         float neighborsHeight = (
-            texture2D(u_state, v_uv + vec2(u_pixelSize.x, 0.0)).r +
-            texture2D(u_state, v_uv - vec2(u_pixelSize.x, 0.0)).r +
-            texture2D(u_state, v_uv + vec2(0.0, u_pixelSize.y)).r +
-            texture2D(u_state, v_uv - vec2(0.0, u_pixelSize.y)).r
+            decodeFloatRGBA(texture2D(u_state, v_uv + vec2(u_pixelSize.x, 0.0))) +
+            decodeFloatRGBA(texture2D(u_state, v_uv - vec2(u_pixelSize.x, 0.0))) +
+            decodeFloatRGBA(texture2D(u_state, v_uv + vec2(0.0, u_pixelSize.y))) +
+            decodeFloatRGBA(texture2D(u_state, v_uv - vec2(0.0, u_pixelSize.y)))
         ) * 0.25;
 
         // Wave equation (Verlet integration)
         float newHeight = (2.0 * currentHeight - previousHeight) + (neighborsHeight - currentHeight) * 2.0;
-
+        
         // Damping
         newHeight *= u_damping;
-        
-        // External force (mouse)
+
+        // External force (mouse)        
         float dist = distance(v_uv, u_mousePos);
         if (dist < 0.02) {
             newHeight += u_mouseForce * (1.0 - dist / 0.02);
         }
 
-        gl_FragColor = vec4(newHeight, currentHeight, 0.0, 1.0); // New state
+        gl_FragColor = encodeFloatRGBA(newHeight);  // New state
     }
 `;
 
@@ -129,7 +157,7 @@ let isMouseDown = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
 let mousePos = [-1, -1]; // Start with mouse outside of camera
-let mouseFirce = 0; // Mouse is not applying force at the begenning
+let mouseForce = 0; // Mouse is not applying force at the begenning
 
 // Adapt canvas size to window dimensions
 function resizeCanvas(){
@@ -197,8 +225,8 @@ const simUniforms = {
 
 // FBO setup for simulation
 const simResolution = 256;
-let stateA = createFBO(gl, simResolution, simResolution, gl.RGBA);
-let stateB = createFBO(gl, simResolution, simResolution, gl.RGBA);
+let stateA = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.UNSIGNED_BYTE);
+let stateB = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.UNSIGNED_BYTE);
 
 
 // Event listeners 
@@ -268,12 +296,15 @@ function render(){
     const projectionMatrix = mat4.create();
     mat4.perspective(projectionMatrix, 45 * Math.PI / 180, gl.canvas.clientWidth / gl.canvas.clientHeight, 0.1, 100.0);
     const viewMatrix = mat4.create();
-    mat4.translate(viewMatrix, viewMatrix, [0, -2, -15]);
-    mat4.rotate(viewMatrix, viewMatrix, rotX, [1, 0, 0]);
-    mat4.rotate(viewMatrix, viewMatrix, rotY, [0, 1, 0]);
+    mat4.lookAt(viewMatrix, [0, 5, 10], [0, 0, 0], [0, 1, 0]); // Camera is at (0,5,10) and it's looking at origin (0,0,0)
+    const modelMatrix = mat4.create();
+    mat4.rotate(modelMatrix, modelMatrix, rotX, [1, 0, 0]);
+    mat4.rotate(modelMatrix, modelMatrix, rotY, [0, 1, 0]);
+
     const mvp = mat4.create();
     mat4.multiply(mvp, projectionMatrix, viewMatrix);
-
+    mat4.multiply(mvp, mvp, modelMatrix); 
+    
     gl.uniformMatrix4fv(renderUniforms.mvp, false, mvp);
     gl.uniform3fv(renderUniforms.lightDir, vec3.normalize(vec3.create(), [0.5, 1.0, 0.7]));
     gl.uniform2f(renderUniforms.pixelSize, 1 / simResolution, 1 / simResolution);
@@ -343,14 +374,14 @@ function createFloorGeometry(width, height, segX, segY){
 }
 
 // FBO and textrue
-function createFBO(gl, width, height, format){
+function createFBO(gl, width, height, format, type){
     const texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture);
-     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(gl.TEXTURE_2D, 0, format, width, height, 0, format, gl.FLOAT, null);
+    gl.texImage2D(gl.TEXTURE_2D, 0, format, width, height, 0, format, type, null);
 
     const fbo = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
