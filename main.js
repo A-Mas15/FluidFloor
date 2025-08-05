@@ -3,21 +3,20 @@ const { mat4, vec3 } = glMatrix; // Exstract mat4 e vec3 from glMatrix
 // Shaders
 const renderVS = `
     attribute vec3 a_position;
-    uniform mat4 u_mvp;
     attribute vec2 a_uv;
-    uniform sampler2D u_heightMap; // Textrure with wawes height
     varying vec2 v_uv;
-
-    // To decode a float from 4 channels to 8-bit
-    float decodeFloatRGBA(vec4 rgba) {
-        return dot(rgba, vec4(1.0, 1.0/255.0, 1.0/65025.0, 1.0/16581375.0));
-    }
+    uniform sampler2D u_heightMap;   // Textrure with waves height
+    uniform mat4 u_modelMatrix;     // Matrix model
+    uniform mat4 u_vp;              // Combined view and projection matrix
+    varying vec3 v_worldPosition;
 
     void main(){
         v_uv = a_uv;
         float height = texture2D(u_heightMap, v_uv).r; 
         vec3 displacedPosition = a_position + vec3(0.0, height * 0.5, 0.0);
-        gl_Position = u_mvp * vec4(displacedPosition, 1.0);
+        gl_Position = u_vp  * u_modelMatrix * vec4(displacedPosition, 1.0);
+        // Determine position in world frame
+        v_worldPosition = (u_modelMatrix * vec4(displacedPosition, 1.0)).xyz;
     }
 `;
 
@@ -28,31 +27,39 @@ const renderFS = `
     uniform sampler2D u_heightMap;
     uniform vec2 u_pixelSize;
     uniform vec3 u_lightDir;
-
-    // To decode a float from 4 channels to 8-bit
-    float decodeFloatRGBA(vec4 rgba) {
-        return dot(rgba, vec4(1.0, 1.0/255.0, 1.0/65025.0, 1.0/16581375.0));
-    }
+    varying vec3 v_worldPosition;   // Vector shader position in world frame
+    uniform vec3 u_cameraPos;
 
     void main(){
-        // Water colour rgb(143, 240, 220) - [Source 1]
+        // Water color rgb(143, 240, 220) - [Source 1]
         float r = 143.0/255.0;
         float g = 240.0/255.0;
         float b = 220.0/255.0;
 
-        // Decode the height of neighboring textels
+        // Heights of neighboring textels
         float hL = texture2D(u_heightMap, v_uv - vec2(u_pixelSize.x, 0.0)).r;
         float hR = texture2D(u_heightMap, v_uv + vec2(u_pixelSize.x, 0.0)).r;
         float hD = texture2D(u_heightMap, v_uv - vec2(0.0, u_pixelSize.y)).r;
         float hU = texture2D(u_heightMap, v_uv + vec2(0.0, u_pixelSize.y)).r;
 
-        vec3 normal = normalize(vec3(hL - hR, 2.0 / (10.0 / 128.0), hD - hU));
+        float worldTexelSize = 10.0 / 256.0;
+        vec3 normal = normalize(vec3(hL - hR, 2.0 * worldTexelSize, hD - hU));
+        // Blinn-Phong illumination
+        vec3 lightDir = normalize(u_lightDir);
+        vec3 viewDir = normalize(u_cameraPos - v_worldPosition);
 
-        // Base shading with ambientlight
-        float diffuse = max(0.0, dot(normal, u_lightDir));
+        // Diffusion
+        float diffuse = max(0.0, dot(normal, lightDir));
         vec3 baseColor = vec3(r, g, b);
-        
-        gl_FragColor = vec4(baseColor * diffuse + 0.2, 1.0); 
+        vec3 diffuseColor = baseColor * diffuse;
+
+        // Specular
+        vec3 halfwayDir = normalize(lightDir + viewDir);
+        float spec = pow(max(dot(normal, halfwayDir), 0.0), 64.0);  // 64 = maxShiniess
+        vec3 specularColor = vec3(1.0, 1.0, 1.0)*spec;              // Add white reflexes
+
+        vec3 finalColor = baseColor * 0.2 + diffuseColor + specularColor; 
+        gl_FragColor = vec4(finalColor, 1.0); 
     }
 `;
 
@@ -75,24 +82,11 @@ const simulationFS = `
     uniform float u_mouseForce;
     uniform float u_damping;
 
-    // Decodes a vec4 (RGBA) into a float
-    float decodeFloatRGBA(vec4 rgba) {
-        return dot(rgba, vec4(1.0, 1.0/255.0, 1.0/65025.0, 1.0/16581375.0));
-    }
-
-    // Encodes a float to a RGBA (vec4)
-    vec4 encodeFloatRGBA(float v) {
-        vec4 enc = vec4(1.0, 255.0, 65025.0, 16581375.0) * v;
-        enc = fract(enc);
-        enc -= enc.yzww * vec4(1.0/255.0, 1.0/255.0, 1.0/255.0, 0.0);
-        return enc;
-    }
 
     void main() {
-        vec4 currentState = texture2D(u_state, v_uv);
         vec4 prevState = texture2D(u_state, v_uv);
-        float currentHeight = prevState.r;
-        float previousHeight = prevState.g;
+        float currentHeight = prevState.r;      // .r indicates current state
+        float previousHeight = prevState.g;     // .g indicates previous state
         // Consider all neighbors to have a spheric wave
         float N = texture2D(u_state, v_uv + vec2(0.0, u_pixelSize.y)).r;
         float S = texture2D(u_state, v_uv - vec2(0.0, u_pixelSize.y)).r;
@@ -102,9 +96,7 @@ const simulationFS = `
         float NW = texture2D(u_state, v_uv + vec2(-u_pixelSize.x, u_pixelSize.y)).r;
         float SE = texture2D(u_state, v_uv + vec2(u_pixelSize.x, -u_pixelSize.y)).r;
         float SW = texture2D(u_state, v_uv - u_pixelSize).r;
-
         float neighborsHeight = (N + S + E + W + NE + NW + SE + SW) / 8.0;
-
 
         // Wave equation (Verlet integration)
         float newHeight = (2.0 * currentHeight - previousHeight) + (neighborsHeight - currentHeight) * 1.5;
@@ -157,10 +149,10 @@ if (!gl) {
 }
 
 // Extensions for FBO
-const floatLinearExt = gl.getExtension('OES_textrue_float_linear');
+const floatLinearExt = gl.getExtension('OES_texture_float_linear');
 const floatTextrueExt = gl.getExtension('OES_texture_float');
 if(!floatTextrueExt){
-    throw new Error("[INIT] Unable to add float textrue. Your browser or machine may not support it.");
+    throw new Error("[INIT] Unable to add float texture. Your browser or machine may not support it.");
 }
 
 // Variables to control camera
@@ -215,7 +207,9 @@ const renderAttribs = {
     uv: gl.getAttribLocation(renderProgram, 'a_uv'), 
 };
 const renderUniforms = {
-    mvp: gl.getUniformLocation(renderProgram, 'u_mvp'),
+    modelMatrix: gl.getUniformLocation(renderProgram, 'u_modelMatrix'),
+    vp: gl.getUniformLocation(renderProgram, 'u_vp'),
+    cameraPos: gl.getUniformLocation(renderProgram, 'u_cameraPos'),
     heightMap: gl.getUniformLocation(renderProgram, 'u_heightMap'), 
     pixelSize: gl.getUniformLocation(renderProgram, 'u_pixelSize'), 
     lightDir: gl.getUniformLocation(renderProgram, 'u_lightDir'),   
@@ -301,28 +295,33 @@ function render(){
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     // Clean canvas
     resizeCanvas();
-    gl.clearColor(0.1, 0.1, 0.2, 1.0); // rgba - [Source 1]
+    gl.clearColor(1.0, 1.0 , 1.0, 0.5); // rgba - [Source 1]
     gl.clear(gl.COLOR_BUFFER_BIT| gl.DEPTH_BUFFER_BIT);
     gl.useProgram(renderProgram);
 
     // Matrices
+    // Projection matrix
     const projectionMatrix = mat4.create();
     mat4.perspective(projectionMatrix, 45 * Math.PI / 180, gl.canvas.clientWidth / gl.canvas.clientHeight, 0.1, 100.0);
+    // View matrix
     const viewMatrix = mat4.create();
     mat4.lookAt(viewMatrix, [0, 5, 10], [0, 0, 0], [0, 1, 0]); // Camera is at (0,5,10) and it's looking at origin (0,0,0)
+    // Model matrix
     const modelMatrix = mat4.create();
     mat4.rotate(modelMatrix, modelMatrix, rotX, [1, 0, 0]);
     mat4.rotate(modelMatrix, modelMatrix, rotY, [0, 1, 0]);
+    // View projection mmatrix
+    const vpMatrix = mat4.create();
+    mat4.multiply(vpMatrix, projectionMatrix, viewMatrix);
 
-    const mvp = mat4.create();
-    mat4.multiply(mvp, projectionMatrix, viewMatrix);
-    mat4.multiply(mvp, mvp, modelMatrix); 
-    
-    gl.uniformMatrix4fv(renderUniforms.mvp, false, mvp);
+    gl.uniformMatrix4fv(renderUniforms.modelMatrix, false, modelMatrix);
+    gl.uniformMatrix4fv(renderUniforms.vp, false, vpMatrix);
+    gl.uniform3fv(renderUniforms.cameraPos, [0, 5, 10]);
     gl.uniform3fv(renderUniforms.lightDir, vec3.normalize(vec3.create(), [0.5, 1.0, 0.7]));
     gl.uniform2f(renderUniforms.pixelSize, 1 / simResolution, 1 / simResolution);
 
-    // Add textrues
+
+    // Add textures
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, stateA.texture);
     gl.uniform1i(renderUniforms.heightMap, 0);
@@ -386,7 +385,7 @@ function createFloorGeometry(width, height, segX, segY){
     };
 }
 
-// FBO and textrue
+// FBO and texture
 function createFBO(gl, width, height, format, type){
     const texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -414,7 +413,7 @@ function createFBO(gl, width, height, format, type){
 
 const floatTexturesExt = gl.getExtension('OES_texture_float');
 if (!floatTexturesExt) {
-    throw new Error('[Float Texture] Something went wrong: browser does not support textrues');
+    throw new Error('[Float Texture] Something went wrong: browser does not support textures');
 }
 
 
