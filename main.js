@@ -1,13 +1,22 @@
+// Some constants
 const { mat4, vec3 } = glMatrix; // Exstract mat4 e vec3 from glMatrix
-
+const floorSegments = 128; 
+const simResolution = 256; 
+const poolDimension = 50.0;     // Pool dimensions
+// To add checkbox and slider
+const reflectionCheckbox = document.getElementById('reflection-checkbox');
+const dampingSlider = document.getElementById('damping-slider');
+const dampingValueSpan = document.getElementById('damping-value');
+const forceSlider = document.getElementById('force-slider');
+const forceValueSpan = document.getElementById('force-value');
 // Shaders
 const renderVS = `
     attribute vec3 a_position;
     attribute vec2 a_uv;
     varying vec2 v_uv;
-    uniform sampler2D u_heightMap;   // Textrure with waves height
-    uniform mat4 u_modelMatrix;     // Matrix model
-    uniform mat4 u_vp;              // Combined view and projection matrix
+    uniform sampler2D u_heightMap;      // Texture with waves heightss
+    uniform mat4 u_modelMatrix;         // Matrix model
+    uniform mat4 u_vp;                  // Combined view and projection matrix
     varying vec3 v_worldPosition;
 
     void main(){
@@ -27,8 +36,11 @@ const renderFS = `
     uniform sampler2D u_heightMap;
     uniform vec2 u_pixelSize;
     uniform vec3 u_lightDir;
-    varying vec3 v_worldPosition;   // Vector shader position in world frame
+    varying vec3 v_worldPosition;       // Vector shader position in world frame
     uniform vec3 u_cameraPos;
+    uniform samplerCube u_skybox;       // Cubemap for sky
+    uniform bool u_showReflections;     // Checkbox to add reflections or not 
+    uniform float u_poolDimension;
 
     void main(){
         // Water color rgb(143, 240, 220) - [Source 1]
@@ -42,7 +54,7 @@ const renderFS = `
         float hD = texture2D(u_heightMap, v_uv - vec2(0.0, u_pixelSize.y)).r;
         float hU = texture2D(u_heightMap, v_uv + vec2(0.0, u_pixelSize.y)).r;
 
-        float worldTexelSize = 10.0 / 256.0;
+        float worldTexelSize =  u_poolDimension / 256.0;
         vec3 normal = normalize(vec3(hL - hR, 2.0 * worldTexelSize, hD - hU));
         // Blinn-Phong illumination
         vec3 lightDir = normalize(u_lightDir);
@@ -51,14 +63,24 @@ const renderFS = `
         // Diffusion
         float diffuse = max(0.0, dot(normal, lightDir));
         vec3 baseColor = vec3(r, g, b);
-        vec3 diffuseColor = baseColor * diffuse;
+        vec3 lightingColor = baseColor * 0.2 + baseColor * diffuse;
+        vec3 finalColor = lightingColor;
 
+        if(u_showReflections){
+            vec3 reflectDir = reflect(-viewDir, normal);
+            vec4 reflectionColor = textureCube(u_skybox, reflectDir);
+            
+            // Fresnel effect
+            float fresnel = pow(1.0 - max(0.0, dot(viewDir, normal)), 5.0);
+            
+            // Mix water color with reflected environment
+            finalColor = mix(lightingColor, reflectionColor.rgb, fresnel);
+        }
         // Specular
         vec3 halfwayDir = normalize(lightDir + viewDir);
         float spec = pow(max(dot(normal, halfwayDir), 0.0), 64.0);  // 64 = maxShiniess
         vec3 specularColor = vec3(1.0, 1.0, 1.0)*spec;              // Add white reflexes
-
-        vec3 finalColor = baseColor * 0.2 + diffuseColor + specularColor; 
+        finalColor += specularColor;
         gl_FragColor = vec4(finalColor, 1.0); 
     }
 `;
@@ -114,6 +136,36 @@ const simulationFS = `
     }
 `;
 
+const skyboxVS = `
+    attribute vec3 a_position;
+    varying vec3 v_texCoord;
+
+    uniform mat4 u_projectionMatrix;
+    uniform mat4 u_viewMatrix;
+
+    void main() {
+        v_texCoord = a_position;
+        
+        // This allows the camera to rotatate without translating, creating the illusion of an infinite space
+        mat4 viewRotationOnly = mat4(mat3(u_viewMatrix));
+
+        vec4 pos = u_projectionMatrix * viewRotationOnly * vec4(a_position, 1.0);
+
+        // The sky is pushed to the furthest point
+        gl_Position = pos.xyww;
+    }
+`;
+
+const skyboxFS = `
+    precision mediump float;
+    varying vec3 v_texCoord;
+    uniform samplerCube u_skybox;
+
+    void main() {
+        gl_FragColor = textureCube(u_skybox, v_texCoord);
+    }
+`;
+
 // Helper functions
 function createShader(gl, type, source){
     const shader = gl.createShader(type);
@@ -140,6 +192,77 @@ function createProgram(gl, vertexShader, fragmentShader){
     gl.deleteProgram(program);
 }
 
+// Create a cubemap to have the sky
+const skyboxVertices = new Float32Array([
+    //   X,    Y,    Z
+    -1.0, -1.0,  1.0, // 0
+     1.0, -1.0,  1.0, // 1
+    -1.0,  1.0,  1.0, // 2
+     1.0,  1.0,  1.0, // 3
+    -1.0, -1.0, -1.0, // 4
+     1.0, -1.0, -1.0, // 5
+    -1.0,  1.0, -1.0, // 6
+     1.0,  1.0, -1.0, // 7
+]);
+
+const skyboxIndices = new Uint16Array([
+    // Positive Z
+    0, 1, 2,   2, 1, 3,
+    // Positive X
+    1, 5, 3,   3, 5, 7,
+    // Negative Z
+    5, 4, 7,   7, 4, 6,
+    // Negative X
+    4, 0, 6,   6, 0, 2,
+    // Positive Y
+    2, 3, 6,   6, 3, 7,
+    // Negative Y
+    4, 5, 0,   0, 5, 1,
+]);
+ 
+ function loadCubeMap(gl, imageUrl, callback) {
+     const image = new Image();
+     // image.crossOrigin = "anonymous"; // Has to do with accesses
+     image.src = imageUrl;
+ 
+     image.addEventListener('load', () => {
+         const faceSize = image.width / 4; 
+ 
+         // Create a temporary canvas to cut the image
+         const tempCanvas = document.createElement('canvas');
+         tempCanvas.width = faceSize;
+         tempCanvas.height = faceSize;
+         const ctx = tempCanvas.getContext('2d');
+ 
+         const texture = gl.createTexture();
+         gl.bindTexture(gl.TEXTURE_CUBE_MAP, texture);
+ 
+         const faceInfos = [
+             { target: gl.TEXTURE_CUBE_MAP_POSITIVE_X, x: 2 * faceSize, y: 1 * faceSize },
+             { target: gl.TEXTURE_CUBE_MAP_NEGATIVE_X, x: 0 * faceSize, y: 1 * faceSize },
+             { target: gl.TEXTURE_CUBE_MAP_POSITIVE_Y, x: 1 * faceSize, y: 0 * faceSize },
+             { target: gl.TEXTURE_CUBE_MAP_NEGATIVE_Y, x: 1 * faceSize, y: 2 * faceSize },
+             { target: gl.TEXTURE_CUBE_MAP_POSITIVE_Z, x: 1 * faceSize, y: 1 * faceSize },
+             { target: gl.TEXTURE_CUBE_MAP_NEGATIVE_Z, x: 3 * faceSize, y: 1 * faceSize },
+         ];
+ 
+         faceInfos.forEach((faceInfo) => {
+             const { target, x, y } = faceInfo;
+             
+             // Draw and upload the cut-up image on the cubemap
+             ctx.drawImage(image, x, y, faceSize, faceSize, 0, 0, faceSize, faceSize);
+             gl.texImage2D(target, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, tempCanvas);
+         });
+ 
+         gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
+         gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+         
+         if (callback) callback(texture);
+     });
+ 
+     return gl.createTexture();
+ }
+
 // Initialize gl
 const canvas = document.getElementById('webgl-canvas');
 const gl = canvas.getContext('webgl');
@@ -150,19 +273,24 @@ if (!gl) {
 
 // Extensions for FBO
 const floatLinearExt = gl.getExtension('OES_texture_float_linear');
-const floatTextrueExt = gl.getExtension('OES_texture_float');
-if(!floatTextrueExt){
+const floatTextureExt = gl.getExtension('OES_texture_float');
+if(!floatTextureExt){
     throw new Error("[INIT] Unable to add float texture. Your browser or machine may not support it.");
 }
 
 // Variables to control camera
-let rotX = 0.5;
-let rotY = -0.5;
-let isMouseDown = false;
-let lastMouseX = 0;
-let lastMouseY = 0;
-let mousePos = [-1, -1]; // Start with mouse outside of camera
-let mouseForce = 0; // Mouse is not applying force at the begenning
+let cameraPosition = vec3.fromValues(0, 2, 15); // Starting psoition
+let cameraYaw = 0.0;                            //  Horizzontal rotation
+let cameraPitch = 0.0;                          // Vertical rotation
+const keysPressed = {};                         // List of pressed keys
+let lastMouseX = 0;                             // Last position of the mouse on the x axis
+let lastMouseY = 0;                             // Last position of the mouse on the y axis
+let mousePos = [-1, -1];                        // Start with mouse outside of camera
+let mouseForce = 0;                             // Mouse is not applying force at the begenning
+let force = 0.3;                                // Starting mouse forced
+let damping = 0.985;                            // Damping 
+let lastTime = 0;                               // Time in seconds
+let fov_degrees = 45.0;                         // Field of View in degrees °
 
 // Adapt canvas size to window dimensions
 function resizeCanvas(){
@@ -173,10 +301,27 @@ function resizeCanvas(){
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
+// Add sky
+let skyboxTexture = null;
+// Image path 
+const skyboxUrls = '/skybox/Untitled.png';
+loadCubeMap(gl, skyboxUrls, (texture) => {
+    skyboxTexture = texture;
+});
+
+// Event listener for sliders
+dampingSlider.addEventListener('input', (e) =>{
+    damping = e.target.value/ 1000.0;
+    dampingValueSpan.textContent = damping.toFixed(3);
+});
+forceSlider.addEventListener('input', (e) =>{
+    force = e.target.value/ 100.0;
+    forceValueSpan.textContent = force.toFixed(2);
+});
+
 // Floor geometry
 gl.enable(gl.DEPTH_TEST);
-const floorSegments = 128;
-const floorGeometry = createFloorGeometry(10, 10, floorSegments, floorSegments);
+const floorGeometry = createFloorGeometry(poolDimension, poolDimension, floorSegments, floorSegments);
 const quadPositions = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
 
 // Buffers
@@ -196,6 +341,14 @@ const quadBuffer = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
 gl.bufferData(gl.ARRAY_BUFFER, quadPositions, gl.STATIC_DRAW);
 
+const skyboxBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, skyboxBuffer);
+gl.bufferData(gl.ARRAY_BUFFER, skyboxVertices, gl.STATIC_DRAW);
+
+const skyboxIndexBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, skyboxIndexBuffer);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, skyboxIndices, gl.STATIC_DRAW);
+
 // Render program
 const renderProgram = createProgram(gl, 
     createShader(gl, gl.VERTEX_SHADER, renderVS),
@@ -213,6 +366,9 @@ const renderUniforms = {
     heightMap: gl.getUniformLocation(renderProgram, 'u_heightMap'), 
     pixelSize: gl.getUniformLocation(renderProgram, 'u_pixelSize'), 
     lightDir: gl.getUniformLocation(renderProgram, 'u_lightDir'),   
+    showReflections: gl.getUniformLocation(renderProgram, 'u_showReflections'),
+    skybox: gl.getUniformLocation(renderProgram, 'u_skybox'),
+    poolDimension: gl.getUniformLocation(renderProgram, 'u_poolDimension'),
 };
 
 const simProgram = createProgram(gl,
@@ -230,8 +386,20 @@ const simUniforms = {
     damping: gl.getUniformLocation(simProgram, 'u_damping'),
 };
 
+const skyboxProgram = createProgram(gl,
+    createShader(gl, gl.VERTEX_SHADER, skyboxVS),
+    createShader(gl, gl.FRAGMENT_SHADER, skyboxFS)
+);
+const skyboxAttribs = {
+    position: gl.getAttribLocation(skyboxProgram, 'a_position'),
+};
+const skyboxUniforms = {
+    projectionMatrix: gl.getUniformLocation(skyboxProgram, 'u_projectionMatrix'),
+    viewMatrix: gl.getUniformLocation(skyboxProgram, 'u_viewMatrix'),
+    skybox: gl.getUniformLocation(skyboxProgram, 'u_skybox'),
+};
+
 // FBO setup for simulation
-const simResolution = 256;
 let stateA = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.FLOAT);
 let stateB = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.FLOAT);
 
@@ -239,48 +407,76 @@ let stateB = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.FLOAT);
 // Event listeners 
 canvas.addEventListener('mousedown', (e) =>{
     isMouseDown = true;
+    canvas.requestPointerLock();      // This hides the pointer, for now it is more confusing than anything...
     lastMouseX = e.clientX;
     lastMouseY = e.clientY;
-    mouseForce = 0.5;   // Apply force when clicking
+    // Some mapping  is necessary since there is a discrpancy in the center
+    const rect = canvas.getBoundingClientRect();
+    const normalizedX = (e.clientX - rect.left) / rect.width;
+    const normalizedY = (e.clientY - rect.top) / rect.height;
+    mousePos = [1.0 - normalizedX, 1.0 - normalizedY]; 
+    mouseForce = force;   // Apply force when clicking - value from slider
 });
 canvas.addEventListener('mouseup', () =>{
     isMouseDown = false;
+    mouseForce = 0;
+    mousePos = [-1, -1];
+
 });
 // Stop rotation if the mouse leaves the frame
 canvas.addEventListener('mouseleave', () => {
     isMouseDown = false;
 });
-canvas.addEventListener('mousemove', (e) => {
-    mousePos = [e.clientX / canvas.width, 1.0 - e.clientY / canvas.height];
-    if (!isMouseDown) 
-        return;
-    const deltaX = e.clientX - lastMouseX;
-    const deltaY = e.clientY - lastMouseY;
-    rotY += deltaX * 0.01;
-    rotX += deltaY * 0.01;
-    // To avoid problem with the camera, this limits the velocity along X axis
-    const maxRotX = Math.PI / 2 - 0.1;
-    rotX = Math.max(-maxRotX, Math.min(maxRotX, rotX));
-    lastMouseX = e.clientX;
-    lastMouseY = e.clientY;
+
+document.addEventListener('mousemove', (e) => {
+    if (document.pointerLockElement === canvas) {
+        cameraYaw -= e.movementX * 0.002;
+        cameraPitch -= e.movementY * 0.002;
+        // To avoid problem with the camera, this limits the velocity 
+        const maxPitch = Math.PI / 2 - 0.1;
+        cameraPitch = Math.max(-maxPitch, Math.min(maxPitch, cameraPitch));
+    }
+    if (!isMouseDown) return;
+    const rect = canvas.getBoundingClientRect();
+    const normalizedX = (e.clientX - rect.left) / rect.width;
+    const normalizedY = (e.clientY - rect.top)  / rect.height;
+    mousePos = [normalizedX, 1.0 - normalizedY];
+});
+canvas.addEventListener('wheel', (e) => {
+    // e.deltaY è positivo quando si scorre verso il basso (zoom out)
+    // e negativo quando si scorre verso l'alto (zoom in)
+    fov_degrees += e.deltaY * 0.05; // La costante 0.05 controlla la velocità dello zoom
+
+    // Aggiungiamo dei limiti per evitare uno zoom eccessivo
+    // (es. tra 15 e 90 gradi)
+    fov_degrees = Math.max(15, Math.min(90, fov_degrees));
+});
+// Event listeners to move in the space
+window.addEventListener('keydown', (e) =>{
+    keysPressed[e.code] = true;
+});
+window.addEventListener('keyup', (e) =>{
+    keysPressed[e.code] = false;
 });
 
 
 // Main rendering loop
-function render(){
+function render(currentTime){
+    updateCamera(currentTime);
     // Simulation step
     gl.useProgram(simProgram);
     gl.bindFramebuffer(gl.FRAMEBUFFER, stateB.fbo);
     gl.viewport(0, 0, simResolution, simResolution);
 
-    gl.activeTexture(gl.TEXTURE0);
+    gl.activeTexture(gl.TEXTURE0);                      // Texture 0 is water texture
     gl.bindTexture(gl.TEXTURE_2D, stateA.texture);
     gl.uniform1i(simUniforms.state, 0);
     
     gl.uniform2f(simUniforms.pixelSize, 1 / simResolution, 1 / simResolution);
     gl.uniform2fv(simUniforms.mousePos, mousePos);
     gl.uniform1f(simUniforms.mouseForce, mouseForce);
-    gl.uniform1f(simUniforms.damping, 0.985);
+    gl.uniform1f(simUniforms.damping, damping);
+    //gl.uniform1f(renderUniforms.poolDimension, poolDimension);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
     gl.enableVertexAttribArray(simAttribs.position);
@@ -295,36 +491,69 @@ function render(){
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     // Clean canvas
     resizeCanvas();
-    gl.clearColor(1.0, 1.0 , 1.0, 0.5); // rgba - [Source 1]
+    // Water color rgb(143, 240, 220) - [Source 1]
+    let r = 143.0/255.0;
+    let g = 240.0/255.0;
+    let b = 220.0/255.0;
+    gl.clearColor(r, g, b, 1.0); // rgba 
     gl.clear(gl.COLOR_BUFFER_BIT| gl.DEPTH_BUFFER_BIT);
-    gl.useProgram(renderProgram);
-
+    
     // Matrices
     // Projection matrix
     const projectionMatrix = mat4.create();
-    mat4.perspective(projectionMatrix, 45 * Math.PI / 180, gl.canvas.clientWidth / gl.canvas.clientHeight, 0.1, 100.0);
-    // View matrix
+    mat4.perspective(projectionMatrix, fov_degrees * Math.PI / 180, gl.canvas.clientWidth / gl.canvas.clientHeight, 0.1, 100.0);
+    // View matrix - dynamic since it needs to change while the user is moving
     const viewMatrix = mat4.create();
-    mat4.lookAt(viewMatrix, [0, 5, 10], [0, 0, 0], [0, 1, 0]); // Camera is at (0,5,10) and it's looking at origin (0,0,0)
+    const cameraTarget = mat4.create();
+    const forward = vec3.fromValues(Math.sin(cameraYaw), Math.sin(cameraPitch), Math.cos(cameraYaw));
+    vec3.normalize(forward, forward);
+    vec3.add(cameraTarget, cameraPosition, forward);
+    mat4.lookAt(viewMatrix, cameraPosition, cameraTarget, [0, 1, 0]);
+
     // Model matrix
     const modelMatrix = mat4.create();
-    mat4.rotate(modelMatrix, modelMatrix, rotX, [1, 0, 0]);
-    mat4.rotate(modelMatrix, modelMatrix, rotY, [0, 1, 0]);
-    // View projection mmatrix
+    // View projection matrix
     const vpMatrix = mat4.create();
     mat4.multiply(vpMatrix, projectionMatrix, viewMatrix);
+    // Draw skybox
+    if (skyboxTexture) {
+        gl.depthFunc(gl.LEQUAL);
+        gl.useProgram(skyboxProgram);
+        gl.uniformMatrix4fv(skyboxUniforms.projectionMatrix, false, projectionMatrix);
+        gl.uniformMatrix4fv(skyboxUniforms.viewMatrix, false, viewMatrix);
+        gl.activeTexture(gl.TEXTURE1);                                                      // Texture 1 is skybox texture
+        gl.bindTexture(gl.TEXTURE_CUBE_MAP, skyboxTexture);
+        gl.uniform1i(skyboxUniforms.skybox, 1);
+        gl.bindBuffer(gl.ARRAY_BUFFER, skyboxBuffer);
+        gl.enableVertexAttribArray(skyboxAttribs.position);
+        gl.vertexAttribPointer(skyboxAttribs.position, 3, gl.FLOAT, false, 0, 0);        
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, skyboxIndexBuffer);
+        gl.drawElements(gl.TRIANGLES, skyboxIndices.length, gl.UNSIGNED_SHORT, 0);
+        gl.depthFunc(gl.LESS);
+    }
+    
+    // Draw water texture
+    gl.useProgram(renderProgram);
 
+    // Send matrices
     gl.uniformMatrix4fv(renderUniforms.modelMatrix, false, modelMatrix);
     gl.uniformMatrix4fv(renderUniforms.vp, false, vpMatrix);
-    gl.uniform3fv(renderUniforms.cameraPos, [0, 5, 10]);
+    gl.uniform3fv(renderUniforms.cameraPos, cameraPosition);
     gl.uniform3fv(renderUniforms.lightDir, vec3.normalize(vec3.create(), [0.5, 1.0, 0.7]));
     gl.uniform2f(renderUniforms.pixelSize, 1 / simResolution, 1 / simResolution);
-
-
-    // Add textures
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, stateA.texture);
     gl.uniform1i(renderUniforms.heightMap, 0);
+    gl.uniform1i(renderUniforms.skybox, 1);
+    
+    // Add textures
+    gl.uniform1f(renderUniforms.poolDimension, poolDimension);
+
+    // Connect texture to checkbox
+    gl.uniform1i(renderUniforms.showReflections, reflectionCheckbox.checked);
+    // Connect cubemap to texture unit 1
+    if (skyboxTexture) {
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_CUBE_MAP, skyboxTexture);
+    }
 
     // Buffers
     gl.enableVertexAttribArray(renderAttribs.position);
@@ -417,3 +646,25 @@ if (!floatTexturesExt) {
 }
 
 
+function updateCamera(currentTime){
+    const deltaTime = (currentTime - lastTime)/1000;    // Time in seconds
+    lastTime = currentTime;
+    const speed = 5.0 * deltaTime;  
+    // Determines movement based on yaw
+    const forward = vec3.fromValues(Math.sin(cameraYaw), 0, Math.cos(cameraYaw));
+    const right = vec3.fromValues(forward[2], 0, -forward[0]);
+
+    // Move by pressing keybord
+    if (keysPressed['KeyW']) {
+        vec3.scaleAndAdd(cameraPosition, cameraPosition, forward, speed);
+    }
+    if (keysPressed['KeyA']) {
+        vec3.scaleAndAdd(cameraPosition, cameraPosition, right, speed);
+    }
+    if (keysPressed['KeyS']) {
+        vec3.scaleAndAdd(cameraPosition, cameraPosition, forward, -speed);
+    }
+    if (keysPressed['KeyD']) {
+        vec3.scaleAndAdd(cameraPosition, cameraPosition, right, -speed);
+    }
+}

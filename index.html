@@ -1,16 +1,35 @@
 <!DOCTYPE html>
 <html>
-<head>
-    <title>Fluid Floor </title>
-    <style>
-        body, html { margin: 0; overflow: hidden; }
-        canvas { display: block; width: 100vw; height: 100vh; }
-    </style>
-</head>
-<body>
-    <canvas id="webgl-canvas"></canvas>
-     <!-- Library to work with matrices -->
-    <script src="gl-matrix-min.js" defer></script> 
-    <script src="main.js" defer></script>
-</body>
+    <head>
+        <title>Fluid Floor </title>
+        <style>
+            body, html { margin: 0; overflow: hidden; }
+            canvas { display: block; width: 100vw; height: 100vh; }
+        </style>
+    </head>
+    <body>
+        <canvas id="webgl-canvas"></canvas>
+        <div style="position: absolute; top: 10px; left: 10px; color: black; font-family: sans-serif; z-index: 10; background-color: rgba(255,255,255,0.7); padding: 10px; border-radius: 5px;">
+            <!---To add a checkbox to show reflections or not-->
+            <div>
+                <input type="checkbox" id="reflection-checkbox" checked>
+                <label for="reflection-checkbox">Add reflections</label>
+            </div>
+            <!-- Add a slider for damping -->
+            <div style="margin-top: 10px;">
+                <label for="damping-slider">Damping: <span id="damping-value">0.985</span></label>
+                <br>
+                <input type="range" id="damping-slider" min="950" max="1000" value="985">
+            </div>
+            <!-- Add a slider to regulate mouse force -->
+            <div style="margin-top: 10px;">
+                <label for="force-slider"> Mouse force: <span id="force-value">0.3</span></label>
+                <br>
+                <input type="range" id="force-slider" min="1" max="100" value="50">
+            </div>
+        </div>
+         <!-- Library to work with matrices -->
+        <script src="gl-matrix-min.js" defer></script> 
+        <script src="main.js" defer></script>
+    </body>
 </html>
