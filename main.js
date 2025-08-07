@@ -3,12 +3,14 @@ const { mat4, vec3 } = glMatrix; // Exstract mat4 e vec3 from glMatrix
 const floorSegments = 128; 
 const simResolution = 256; 
 const poolDimension = 50.0;     // Pool dimensions
+const MAX_LIGHTS = 4;            // Max number of torches
 // To add checkbox and slider
 const reflectionCheckbox = document.getElementById('reflection-checkbox');
 const dampingSlider = document.getElementById('damping-slider');
 const dampingValueSpan = document.getElementById('damping-value');
 const forceSlider = document.getElementById('force-slider');
 const forceValueSpan = document.getElementById('force-value');
+
 // Shaders
 const renderVS = `
     attribute vec3 a_position;
@@ -35,18 +37,21 @@ const renderFS = `
     varying vec2 v_uv;
     uniform sampler2D u_heightMap;
     uniform vec2 u_pixelSize;
-    uniform vec3 u_lightDir;
     varying vec3 v_worldPosition;       // Vector shader position in world frame
     uniform vec3 u_cameraPos;
     uniform samplerCube u_skybox;       // Cubemap for sky
     uniform bool u_showReflections;     // Checkbox to add reflections or not 
     uniform float u_poolDimension;
+    // Add different lights for the 4 torches
+    uniform vec3 u_lightPositions[${MAX_LIGHTS}];
+    uniform vec3 u_lightColors[${MAX_LIGHTS}];
 
     void main(){
         // Water color rgb(143, 240, 220) - [Source 1]
         float r = 143.0/255.0;
         float g = 240.0/255.0;
         float b = 220.0/255.0;
+        vec3 baseColor = vec3(r, g, b);
 
         // Heights of neighboring textels
         float hL = texture2D(u_heightMap, v_uv - vec2(u_pixelSize.x, 0.0)).r;
@@ -57,13 +62,24 @@ const renderFS = `
         float worldTexelSize =  u_poolDimension / 256.0;
         vec3 normal = normalize(vec3(hL - hR, 2.0 * worldTexelSize, hD - hU));
         // Blinn-Phong illumination
-        vec3 lightDir = normalize(u_lightDir);
         vec3 viewDir = normalize(u_cameraPos - v_worldPosition);
 
-        // Diffusion
-        float diffuse = max(0.0, dot(normal, lightDir));
-        vec3 baseColor = vec3(r, g, b);
-        vec3 lightingColor = baseColor * 0.2 + baseColor * diffuse;
+        // Model for more lights
+        vec3 totalDiffuse = vec3(0.0);
+        vec3 totalSpecular = vec3(0.0);
+        for(int i = 0; i < ${MAX_LIGHTS}; i++){
+            vec3 lightDir = normalize(u_lightPositions[i] - v_worldPosition);
+            vec3 lightColor = u_lightColors[i];
+            // Diffusion
+            float diffuse = max(0.0, dot(normal, lightDir));
+            totalDiffuse += lightColor*diffuse;
+            // Specular
+            vec3 halfwayDir = normalize(lightDir + viewDir);
+            float spec = pow(max(dot(normal, halfwayDir), 0.0), 64.0);  // 64 = maxShiniess
+            totalSpecular += lightColor*spec;      
+        }
+
+        vec3 lightingColor = baseColor * 0.2 + baseColor * totalDiffuse;
         vec3 finalColor = lightingColor;
 
         if(u_showReflections){
@@ -76,11 +92,8 @@ const renderFS = `
             // Mix water color with reflected environment
             finalColor = mix(lightingColor, reflectionColor.rgb, fresnel);
         }
-        // Specular
-        vec3 halfwayDir = normalize(lightDir + viewDir);
-        float spec = pow(max(dot(normal, halfwayDir), 0.0), 64.0);  // 64 = maxShiniess
-        vec3 specularColor = vec3(1.0, 1.0, 1.0)*spec;              // Add white reflexes
-        finalColor += specularColor;
+        
+        finalColor += totalSpecular;
         gl_FragColor = vec4(finalColor, 1.0); 
     }
 `;
@@ -292,6 +305,14 @@ let damping = 0.985;                            // Damping
 let lastTime = 0;                               // Time in seconds
 let fov_degrees = 45.0;                         // Field of View in degrees °
 
+// To add lights
+const lights = [
+    { position: vec3.fromValues(-5.0, 1.5, -5.0), color: vec3.fromValues(1.0, 0.5, 0.5) }, // Red       rgb(255, 127, 127)
+    { position: vec3.fromValues(5.0, 1.5, -5.0), color: vec3.fromValues(0.5, 1.0, 0.5) },  // Green     rgb(127, 255, 127)
+    { position: vec3.fromValues(0.0, 1.5, 5.0), color: vec3.fromValues(0.5, 0.5, 1.0) },   // Purple    rgb(127, 127, 225)
+    { position: vec3.fromValues(-5.0, 1.5, 5.0), color: vec3.fromValues(1.0, 1.0, 0.5) }   // Yellow    rgb(225, 225, 127)
+];
+
 // Adapt canvas size to window dimensions
 function resizeCanvas(){
     canvas.width = window.innerWidth;
@@ -365,12 +386,17 @@ const renderUniforms = {
     cameraPos: gl.getUniformLocation(renderProgram, 'u_cameraPos'),
     heightMap: gl.getUniformLocation(renderProgram, 'u_heightMap'), 
     pixelSize: gl.getUniformLocation(renderProgram, 'u_pixelSize'), 
-    lightDir: gl.getUniformLocation(renderProgram, 'u_lightDir'),   
+    lightPositions: [],
+    lightColors: [],
     showReflections: gl.getUniformLocation(renderProgram, 'u_showReflections'),
     skybox: gl.getUniformLocation(renderProgram, 'u_skybox'),
     poolDimension: gl.getUniformLocation(renderProgram, 'u_poolDimension'),
 };
-
+// Add uniform
+for(let i = 0; i < MAX_LIGHTS; i++){
+    renderUniforms.lightPositions.push(gl.getUniformLocation(renderProgram, `u_lightPositions[${i}]`));
+    renderUniforms.lightColors.push(gl.getUniformLocation(renderProgram, `u_lightColors[${i}]`));
+}
 const simProgram = createProgram(gl,
     createShader(gl, gl.VERTEX_SHADER, simulationVS),
     createShader(gl, gl.FRAGMENT_SHADER, simulationFS)
@@ -539,7 +565,11 @@ function render(currentTime){
     gl.uniformMatrix4fv(renderUniforms.modelMatrix, false, modelMatrix);
     gl.uniformMatrix4fv(renderUniforms.vp, false, vpMatrix);
     gl.uniform3fv(renderUniforms.cameraPos, cameraPosition);
-    gl.uniform3fv(renderUniforms.lightDir, vec3.normalize(vec3.create(), [0.5, 1.0, 0.7]));
+    // Send torches data to shader
+    lights.forEach((light, i) =>{
+        gl.uniform3fv(renderUniforms.lightPositions[i], light.position);
+        gl.uniform3fv(renderUniforms.lightColors[i], light.color);
+    });
     gl.uniform2f(renderUniforms.pixelSize, 1 / simResolution, 1 / simResolution);
     gl.uniform1i(renderUniforms.heightMap, 0);
     gl.uniform1i(renderUniforms.skybox, 1);
