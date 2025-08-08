@@ -55,7 +55,7 @@ With the core water system in place, the project will now proceed to the next pl
 3.  The project will open in your default browser.
 
 ### Controls
-- **Rotate Camera**: Click & drag
+- **Rotate Camera**: R and move mouse
 - **Move**: W/A/S/D
 - **Zoom FOV**: Mouse wheel
 - **Ripple Water**: Click or drag on water
