@@ -1,9 +1,12 @@
-// Some constants
-const { mat4, vec3 } = glMatrix; // Exstract mat4 e vec3 from glMatrix
+// Global variables and constants
+const { mat4, vec3 } = glMatrix;    // Exstract mat4 e vec3 from glMatrix
 const floorSegments = 128; 
 const simResolution = 256; 
-const poolDimension = 50.0;     // Pool dimensions
-const MAX_LIGHTS = 4;            // Max number of torches
+const poolDimension = 50.0;         // Pool dimensions
+const MAX_LIGHTS = 4;               // Max number of torches
+let torchGeometry = null;
+let torchProgram, torchAttribs, torchUniforms;
+let torchPositionBuffer, torchIndexBuffer;
 // To add checkbox and slider
 const reflectionCheckbox = document.getElementById('reflection-checkbox');
 const dampingSlider = document.getElementById('damping-slider');
@@ -179,6 +182,25 @@ const skyboxFS = `
     }
 `;
 
+const torchVS= `
+    attribute vec3 a_position;
+    uniform mat4 u_modelMatrix;
+    uniform mat4 u_vp;
+
+    void main(){
+        gl_Position = u_vp*u_modelMatrix*vec4(a_position, 1.0);
+    }
+`;
+
+const torchFS = `
+    precision mediump float;
+    uniform vec3 u_color;
+
+    void main(){
+        gl_FragColor = vec4(u_color, 1.0);
+    }
+`;
+
 // Helper functions
 function createShader(gl, type, source){
     const shader = gl.createShader(type);
@@ -298,6 +320,7 @@ let cameraPitch = 0.0;                          // Vertical rotation
 const keysPressed = {};                         // List of pressed keys
 let lastMouseX = 0;                             // Last position of the mouse on the x axis
 let lastMouseY = 0;                             // Last position of the mouse on the y axis
+let isMouseDown = false;
 let mousePos = [-1, -1];                        // Start with mouse outside of camera
 let mouseForce = 0;                             // Mouse is not applying force at the begenning
 let force = 0.3;                                // Starting mouse forced
@@ -433,7 +456,6 @@ let stateB = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.FLOAT);
 // Event listeners 
 canvas.addEventListener('mousedown', (e) =>{
     isMouseDown = true;
-    canvas.requestPointerLock();      // This hides the pointer, for now it is more confusing than anything...
     lastMouseX = e.clientX;
     lastMouseY = e.clientY;
     // Some mapping  is necessary since there is a discrpancy in the center
@@ -469,17 +491,18 @@ document.addEventListener('mousemove', (e) => {
     mousePos = [normalizedX, 1.0 - normalizedY];
 });
 canvas.addEventListener('wheel', (e) => {
-    // e.deltaY è positivo quando si scorre verso il basso (zoom out)
-    // e negativo quando si scorre verso l'alto (zoom in)
-    fov_degrees += e.deltaY * 0.05; // La costante 0.05 controlla la velocità dello zoom
-
-    // Aggiungiamo dei limiti per evitare uno zoom eccessivo
-    // (es. tra 15 e 90 gradi)
+    // e.deltaY positive when zooming out
+    // e.deltaY negative when zooming in
+    fov_degrees += e.deltaY * 0.05; 
+    // Limits to avoid excessive zooming in and out (it will flip the scene upside down)
     fov_degrees = Math.max(15, Math.min(90, fov_degrees));
 });
 // Event listeners to move in the space
 window.addEventListener('keydown', (e) =>{
     keysPressed[e.code] = true;
+    if(keysPressed['KeyR']) {
+        canvas.requestPointerLock();      // This hides the pointer, for now it is more confusing than anything...
+    };
 });
 window.addEventListener('keyup', (e) =>{
     keysPressed[e.code] = false;
@@ -597,6 +620,28 @@ function render(currentTime){
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
     gl.drawElements(gl.TRIANGLES, floorGeometry.indices.length, gl.UNSIGNED_SHORT, 0);
 
+    // Draw the torches
+    if (torchGeometry) {
+        gl.useProgram(torchProgram);
+
+        // Set up buffers
+        gl.bindBuffer(gl.ARRAY_BUFFER, torchPositionBuffer);
+        gl.enableVertexAttribArray(torchAttribs.position);
+        gl.vertexAttribPointer(torchAttribs.position, 3, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, torchIndexBuffer);
+        // View-projection matrix
+        gl.uniformMatrix4fv(torchUniforms.vp, false, vpMatrix);
+
+        // Draw each object for each light
+        lights.forEach(light => {
+            const modelMatrix = mat4.create();
+            mat4.translate(modelMatrix, modelMatrix, light.position);
+            gl.uniformMatrix4fv(torchUniforms.modelMatrix, false, modelMatrix);    
+            gl.uniform3fv(torchUniforms.color, light.color);
+
+            gl.drawElements(gl.TRIANGLES, torchGeometry.indices.length, gl.UNSIGNED_SHORT, 0);
+        });
+    }
 
     requestAnimationFrame(render);
 }
@@ -698,3 +743,175 @@ function updateCamera(currentTime){
         vec3.scaleAndAdd(cameraPosition, cameraPosition, right, -speed);
     }
 }
+
+// To upload an object in the scene
+function loadObj(text) {
+    // Array temporanei per contenere i dati grezzi dal file.
+    const objPositions = [];
+    const objTexcoords = []; // Aggiunto per le coordinate texture
+    const objNormals = [];
+
+    // Array finali per WebGL, srotolati.
+    const finalPositions = [];
+    const finalTexcoords = [];
+    const finalNormals = [];
+    const finalIndices = [];
+
+    // Cache per ottimizzare ed evitare vertici duplicati.
+    // La chiave è la stringa "v/vt/vn", il valore è l'indice finale.
+    const vertexCache = new Map();
+
+    const lines = text.split('\n');
+    for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (trimmedLine.length === 0 || trimmedLine.startsWith('#')) {
+            continue; // Salta righe vuote e commenti
+        }
+
+        const parts = trimmedLine.split(/\s+/);
+        const keyword = parts[0];
+
+        if (keyword === 'v') {
+            objPositions.push(parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]));
+        } else if (keyword === 'vt') {
+            // Gestisce coordinate texture 2D (la maggior parte dei casi)
+            objTexcoords.push(parseFloat(parts[1]), parseFloat(parts[2]));
+        } else if (keyword === 'vn') {
+            objNormals.push(parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]));
+        } else if (keyword === 'f') {
+            const faceVertexData = parts.slice(1); // Es. ["1/1/1", "2/2/1", "18/18/1", "17/17/1"]
+            const faceIndices = [];
+
+            for (const vertexString of faceVertexData) {
+                // Se abbiamo già processato questa combinazione v/vt/vn, riutilizzala
+                if (vertexCache.has(vertexString)) {
+                    faceIndices.push(vertexCache.get(vertexString));
+                    continue;
+                }
+
+                // È un vertice nuovo, va srotolato
+                const vertexParts = vertexString.split('/');
+                const posIndex = parseInt(vertexParts[0]) - 1;
+                const texIndex = vertexParts.length > 1 && vertexParts[1] ? parseInt(vertexParts[1]) - 1 : -1;
+                const normIndex = vertexParts.length > 2 && vertexParts[2] ? parseInt(vertexParts[2]) - 1 : -1;
+                
+                // Il nuovo indice sarà la posizione attuale nell'array finale
+                const newIndex = finalPositions.length / 3;
+                
+                // Aggiungi i dati agli array finali
+                // Posizioni (3 componenti: x, y, z)
+                finalPositions.push(objPositions[posIndex * 3], objPositions[posIndex * 3 + 1], objPositions[posIndex * 3 + 2]);
+                
+                // Coordinate Texture (2 componenti: u, v) - se esistono
+                if (texIndex !== -1) {
+                    finalTexcoords.push(objTexcoords[texIndex * 2], objTexcoords[texIndex * 2 + 1]);
+                }
+
+                // Normali (3 componenti: nx, ny, nz) - se esistono
+                if (normIndex !== -1) {
+                    finalNormals.push(objNormals[normIndex * 3], objNormals[normIndex * 3 + 1], objNormals[normIndex * 3 + 2]);
+                }
+                
+                faceIndices.push(newIndex);
+                vertexCache.set(vertexString, newIndex);
+            }
+
+            // Triangolazione della faccia (gestisce triangoli, quadrilateri e n-goni)
+            for (let i = 1; i < faceIndices.length - 1; ++i) {
+                finalIndices.push(
+                    faceIndices[0], 
+                    faceIndices[i], 
+                    faceIndices[i + 1]
+                );
+            }
+        }
+    }
+    
+    // Controlla che i buffer non siano vuoti prima di crearli
+    return {
+        positions: finalPositions.length > 0 ? new Float32Array(finalPositions) : null,
+        texcoords: finalTexcoords.length > 0 ? new Float32Array(finalTexcoords) : null,
+        normals: finalNormals.length > 0 ? new Float32Array(finalNormals) : null,
+        indices: finalIndices.length > 0 ? new Uint32Array(finalIndices) : null,
+    };
+}
+
+// Function to create and place the toarches
+async function setupTorchModel(url) {
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`[OBJ Loader] Failed to load model: ${response.statusText}`);
+        }
+        const text = await response.text();
+        torchGeometry = loadObj(text);
+        console.log("Teapot has geometry:", torchGeometry);
+
+        // Normalization logic, take from homework3
+        const positions = torchGeometry.positions;
+        if(positions.length > 0){
+            const min = [positions[0], positions[1], positions[2]];
+            const max = [positions[0], positions[1], positions[2]];
+            for (let i = 3; i < positions.length; i += 3) {
+                for (let j = 0; j < 3; j++) {
+                    if (positions[i+j] < min[j])
+                        min[j] = positions[i+j];
+                    if(positions[i+j] >max[j])
+                        max[j] = positions[i+j];
+                }
+            }
+
+            // Determin shift and scale
+            const shift = [
+                -(min[0] + max[0])/2,
+                -(min[1] + max[1])/2,
+                -(min[2] + max[2])/2,
+            ];
+            const size = [
+                (max[0] - min[0]),
+                (max[1] - min[1]),
+                (max[2] - min[2]),
+            ];
+            const maxSize = Math.max(size[0], size[1], size[2]);
+            const scale = (maxSize>0) ? 1.0/maxSize : 1.0;
+
+            // Apply shift and scale
+            for (let i = 0; i < positions.length; i += 3) {
+                positions[i] = (positions[i] + shift[0]) * scale;
+                positions[i + 1] = (positions[i + 1] + shift[1]) * scale;
+                positions[i + 2] = (positions[i + 2] + shift[2]) * scale;
+            }
+        }
+        // Create shader for torches
+        torchProgram = createProgram(gl,
+            createShader(gl, gl.VERTEX_SHADER, torchVS),
+            createShader(gl, gl.FRAGMENT_SHADER, torchFS)
+        );
+
+        // Attributes and uniforms
+        torchAttribs = {
+            position: gl.getAttribLocation(torchProgram, 'a_position'),
+        };
+        torchUniforms = {
+            modelMatrix: gl.getUniformLocation(torchProgram, 'u_modelMatrix'),
+            vp: gl.getUniformLocation(torchProgram, 'u_vp'),
+            color: gl.getUniformLocation(torchProgram, 'u_color'),
+        };
+
+        // Buffers
+        torchPositionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, torchPositionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, torchGeometry.positions, gl.STATIC_DRAW);
+
+        torchIndexBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, torchIndexBuffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, torchGeometry.indices, gl.STATIC_DRAW);
+
+        console.log("Position of uniform of teapots:", torchUniforms);
+
+    } catch (error) {
+        console.error(error);
+    }
+}
+
+setupTorchModel('teapot.obj');
