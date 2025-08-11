@@ -1,18 +1,35 @@
 // Global variables and constants
-const { mat4, vec3 } = glMatrix;    // Exstract mat4 e vec3 from glMatrix
+const { mat4, vec3, vec4 } = glMatrix;    // Exstract mat4 e vec3 from glMatrix
+
 const floorSegments = 128; 
 const simResolution = 256; 
 const poolDimension = 50.0;         // Pool dimensions
 const MAX_LIGHTS = 4;               // Max number of torches
+const TEAPOT_SCALE = 0.6;           // Scale to draw teapots
+
 let torchGeometry = null;
 let torchProgram, torchAttribs, torchUniforms;
 let torchPositionBuffer, torchIndexBuffer;
+let torchModelRadius = 0.5;
+
+// Matrices for picking
+let lastProjectionMatrix = mat4.create();
+let lastViewMatrix = mat4.create();
+
 // To add checkbox and slider
 const reflectionCheckbox = document.getElementById('reflection-checkbox');
 const dampingSlider = document.getElementById('damping-slider');
 const dampingValueSpan = document.getElementById('damping-value');
 const forceSlider = document.getElementById('force-slider');
 const forceValueSpan = document.getElementById('force-value');
+
+// Canvas and GL initialization
+const canvas = document.getElementById('webgl-canvas');
+const gl = canvas.getContext('webgl');
+
+if (!gl) {
+	throw new Error("[INIT] Unable to initialize WebGL. Your browser or machine may not support it.");
+}
 
 // Shaders
 const renderVS = `
@@ -33,7 +50,6 @@ const renderVS = `
         v_worldPosition = (u_modelMatrix * vec4(displacedPosition, 1.0)).xyz;
     }
 `;
-
 
 const renderFS = `
     precision highp float;
@@ -61,7 +77,6 @@ const renderFS = `
         float hR = texture2D(u_heightMap, v_uv + vec2(u_pixelSize.x, 0.0)).r;
         float hD = texture2D(u_heightMap, v_uv - vec2(0.0, u_pixelSize.y)).r;
         float hU = texture2D(u_heightMap, v_uv + vec2(0.0, u_pixelSize.y)).r;
-
         float worldTexelSize =  u_poolDimension / 256.0;
         vec3 normal = normalize(vec3(hL - hR, 2.0 * worldTexelSize, hD - hU));
         // Blinn-Phong illumination
@@ -298,14 +313,6 @@ const skyboxIndices = new Uint16Array([
      return gl.createTexture();
  }
 
-// Initialize gl
-const canvas = document.getElementById('webgl-canvas');
-const gl = canvas.getContext('webgl');
-
-if (!gl) {
-	throw new Error("[INIT] Unable to initialize WebGL. Your browser or machine may not support it.");
-}
-
 // Extensions for FBO
 const floatLinearExt = gl.getExtension('OES_texture_float_linear');
 const floatTextureExt = gl.getExtension('OES_texture_float');
@@ -327,14 +334,6 @@ let force = 0.3;                                // Starting mouse forced
 let damping = 0.985;                            // Damping 
 let lastTime = 0;                               // Time in seconds
 let fov_degrees = 45.0;                         // Field of View in degrees °
-
-// To add lights
-const lights = [
-    { position: vec3.fromValues(-5.0, 1.5, -5.0), color: vec3.fromValues(1.0, 0.5, 0.5) }, // Red       rgb(255, 127, 127)
-    { position: vec3.fromValues(5.0, 1.5, -5.0), color: vec3.fromValues(0.5, 1.0, 0.5) },  // Green     rgb(127, 255, 127)
-    { position: vec3.fromValues(0.0, 1.5, 5.0), color: vec3.fromValues(0.5, 0.5, 1.0) },   // Purple    rgb(127, 127, 225)
-    { position: vec3.fromValues(-5.0, 1.5, 5.0), color: vec3.fromValues(1.0, 1.0, 0.5) }   // Yellow    rgb(225, 225, 127)
-];
 
 // Adapt canvas size to window dimensions
 function resizeCanvas(){
@@ -458,6 +457,29 @@ canvas.addEventListener('mousedown', (e) =>{
     isMouseDown = true;
     lastMouseX = e.clientX;
     lastMouseY = e.clientY;
+    
+    // To turn on/off the lights
+    const { origin, dir } = makeRayFromScreen(
+        e.clientX, e.clientY, 
+        lastProjectionMatrix, lastViewMatrix
+    );
+
+    const hitRadius = torchModelRadius * TEAPOT_SCALE * 2.0;
+    let hitIndex = -1, bestT = Number.POSITIVE_INFINITY;
+
+    for (let i = 0; i < teapotSources.length; i++) {
+        const t = raySphere(origin, dir, teapotSources[i].position, hitRadius);
+        if (t !== null && t < bestT) {
+            bestT = t;
+            hitIndex = i;
+        }
+    }
+
+    if (hitIndex >= 0) {
+        teapotSources[hitIndex].isOn = !teapotSources[hitIndex].isOn;
+        return; // return: do not generate a wave
+    }
+    // To create waves
     // Some mapping  is necessary since there is a discrpancy in the center
     const rect = canvas.getBoundingClientRect();
     const normalizedX = (e.clientX - rect.left) / rect.width;
@@ -564,6 +586,8 @@ function render(currentTime){
     // View projection matrix
     const vpMatrix = mat4.create();
     mat4.multiply(vpMatrix, projectionMatrix, viewMatrix);
+    mat4.copy(lastProjectionMatrix, projectionMatrix);
+    mat4.copy(lastViewMatrix, viewMatrix);
     // Draw skybox
     if (skyboxTexture) {
         gl.depthFunc(gl.LEQUAL);
@@ -588,15 +612,25 @@ function render(currentTime){
     gl.uniformMatrix4fv(renderUniforms.modelMatrix, false, modelMatrix);
     gl.uniformMatrix4fv(renderUniforms.vp, false, vpMatrix);
     gl.uniform3fv(renderUniforms.cameraPos, cameraPosition);
-    // Send torches data to shader
-    lights.forEach((light, i) =>{
-        gl.uniform3fv(renderUniforms.lightPositions[i], light.position);
-        gl.uniform3fv(renderUniforms.lightColors[i], light.color);
-    });
     gl.uniform2f(renderUniforms.pixelSize, 1 / simResolution, 1 / simResolution);
     gl.uniform1i(renderUniforms.heightMap, 0);
     gl.uniform1i(renderUniforms.skybox, 1);
     
+    // Add the teapots
+    for (let i = 0; i < MAX_LIGHTS; i++) {
+        const src = teapotSources[i];
+        if (src && src.isOn) {
+            gl.uniform3fv(renderUniforms.lightPositions[i], src.position);
+            gl.uniform3fv(renderUniforms.lightColors[i],  src.color);
+        } else if (src) {
+            gl.uniform3fv(renderUniforms.lightPositions[i], src.position);
+            gl.uniform3fv(renderUniforms.lightColors[i],  vec3.fromValues(0.0, 0.0, 0.0));
+        } else {
+            // Empty slots
+            gl.uniform3fv(renderUniforms.lightPositions[i], vec3.fromValues(0.0, -9999.0, 0.0));
+            gl.uniform3fv(renderUniforms.lightColors[i],    vec3.fromValues(0.0, 0.0, 0.0));
+        }
+    }
     // Add textures
     gl.uniform1f(renderUniforms.poolDimension, poolDimension);
 
@@ -624,20 +658,22 @@ function render(currentTime){
     if (torchGeometry) {
         gl.useProgram(torchProgram);
 
-        // Set up buffers
         gl.bindBuffer(gl.ARRAY_BUFFER, torchPositionBuffer);
         gl.enableVertexAttribArray(torchAttribs.position);
         gl.vertexAttribPointer(torchAttribs.position, 3, gl.FLOAT, false, 0, 0);
+
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, torchIndexBuffer);
-        // View-projection matrix
         gl.uniformMatrix4fv(torchUniforms.vp, false, vpMatrix);
 
-        // Draw each object for each light
-        lights.forEach(light => {
+        teapotSources.forEach(src => {
             const modelMatrix = mat4.create();
-            mat4.translate(modelMatrix, modelMatrix, light.position);
-            gl.uniformMatrix4fv(torchUniforms.modelMatrix, false, modelMatrix);    
-            gl.uniform3fv(torchUniforms.color, light.color);
+            mat4.translate(modelMatrix, modelMatrix, src.position);
+            mat4.scale(modelMatrix, modelMatrix, [TEAPOT_SCALE, TEAPOT_SCALE, TEAPOT_SCALE]); // scala modello
+            gl.uniformMatrix4fv(torchUniforms.modelMatrix, false, modelMatrix);
+
+            // colore acceso/spento
+            const off = vec3.fromValues(0.25, 0.25, 0.25);
+            gl.uniform3fv(torchUniforms.color, src.isOn ? src.color : off);
 
             gl.drawElements(gl.TRIANGLES, torchGeometry.indices.length, gl.UNSIGNED_SHORT, 0);
         });
@@ -744,14 +780,62 @@ function updateCamera(currentTime){
     }
 }
 
+function makeRayFromScreen(clientX, clientY, projectionMatrix, viewMatrix) {
+    const rect = canvas.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -(((clientY - rect.top) / rect.height) * 2 - 1);
+
+    const invPV = mat4.create();
+    const pv = mat4.create();
+    mat4.multiply(pv, projectionMatrix, viewMatrix);
+    mat4.invert(invPV, pv);
+
+    const pNear = vec4.fromValues(x, y, -1, 1);
+    const pFar  = vec4.fromValues(x, y,  1, 1);
+
+    vec4.transformMat4(pNear, pNear, invPV);
+    vec4.transformMat4(pFar,  pFar,  invPV);
+
+    // de-omogeneizza
+    for (let p of [pNear, pFar]) {
+        p[0] /= p[3]; p[1] /= p[3]; p[2] /= p[3]; p[3] = 1.0;
+    }
+
+    const origin = vec3.fromValues(pNear[0], pNear[1], pNear[2]);
+    const dir = vec3.create();
+    vec3.sub(dir, vec3.fromValues(pFar[0], pFar[1], pFar[2]), origin);
+    vec3.normalize(dir, dir);
+    return { origin, dir };
+}
+
+
+function raySphere(origin, dir, center, radius) {
+    const oc = vec3.create();
+    vec3.sub(oc, origin, center);
+    const b = vec3.dot(oc, dir);
+    const c = vec3.dot(oc, oc) - radius*radius;
+    const disc = b*b - c;
+    if (disc < 0) return null;
+    const t = -b - Math.sqrt(disc);
+    return (t >= 0) ? t : null;
+}
+
+// To add the lights
+const teapotSources = [
+    { position: vec3.fromValues(-5.0, 1.5, -5.0), color: vec3.fromValues(1.0, 0.5, 0.5), isOn: true },
+    { position: vec3.fromValues( 5.0, 1.5, -5.0), color: vec3.fromValues(0.5, 1.0, 0.5), isOn: true },
+    { position: vec3.fromValues( 0.0, 1.5,  5.0), color: vec3.fromValues(0.5, 0.5, 1.0), isOn: true },
+    { position: vec3.fromValues(-5.0, 1.5,  5.0), color: vec3.fromValues(1.0, 1.0, 0.5), isOn: true },
+];
+
 // To upload an object in the scene
 function loadObj(text) {
-    // Array temporanei per contenere i dati grezzi dal file.
+    // Temporary array to save object coordinates
     const objPositions = [];
-    const objTexcoords = []; // Aggiunto per le coordinate texture
+    const objTexcoords = []; 
     const objNormals = [];
 
-    // Array finali per WebGL, srotolati.
+    // Unraveled array
     const finalPositions = [];
     const finalTexcoords = [];
     const finalNormals = [];
