@@ -3,9 +3,9 @@ const { mat4, vec3, vec4 } = glMatrix;    // Exstract mat4 e vec3 from glMatrix
 
 const floorSegments = 128; 
 const simResolution = 256; 
-const poolDimension = 50.0;         // Pool dimensions
-const MAX_LIGHTS = 4;               // Max number of torches
-const TEAPOT_SCALE = 0.6;           // Scale to draw teapots
+const poolDimension = 60.0;         // Pool dimensions
+const MAX_LIGHTS = 8;               // Max number of torches
+const TEAPOT_SCALE = 2.0;           // Scale to draw teapots
 
 let torchGeometry = null;
 let torchProgram, torchAttribs, torchUniforms;
@@ -562,11 +562,7 @@ function render(currentTime){
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     // Clean canvas
     resizeCanvas();
-    // Water color rgb(143, 240, 220) - [Source 1]
-    let r = 143.0/255.0;
-    let g = 240.0/255.0;
-    let b = 220.0/255.0;
-    gl.clearColor(r, g, b, 1.0); // rgba 
+    gl.clearColor(0.0, 0.0, 0.0, 1.0); // rgba 
     gl.clear(gl.COLOR_BUFFER_BIT| gl.DEPTH_BUFFER_BIT);
     
     // Matrices
@@ -820,12 +816,17 @@ function raySphere(origin, dir, center, radius) {
     return (t >= 0) ? t : null;
 }
 
-// To add the lights
+// To add the lights - number and placement
 const teapotSources = [
-    { position: vec3.fromValues(-5.0, 1.5, -5.0), color: vec3.fromValues(1.0, 0.5, 0.5), isOn: true },
-    { position: vec3.fromValues( 5.0, 1.5, -5.0), color: vec3.fromValues(0.5, 1.0, 0.5), isOn: true },
-    { position: vec3.fromValues( 0.0, 1.5,  5.0), color: vec3.fromValues(0.5, 0.5, 1.0), isOn: true },
-    { position: vec3.fromValues(-5.0, 1.5,  5.0), color: vec3.fromValues(1.0, 1.0, 0.5), isOn: true },
+    //                          x                       z         y                              r    g   b
+    { position: vec3.fromValues(-(poolDimension/2)+4,   2.0,    (poolDimension/2)-4),   color: vec3.fromValues(1.0, 0.0, 0.0), isOn: true },  // rgb(255, 0, 0) - [Source 1]
+    { position: vec3.fromValues( 0.0,                   2.0,    (poolDimension/2)-4),   color: vec3.fromValues(1.0, 0.5, 0.0), isOn: true },  // rgb(255, 127, 0) - [Source 1]
+    { position: vec3.fromValues( (poolDimension/2)-4,   2.0,    (poolDimension/2)-4),   color: vec3.fromValues(1.0, 1.0, 0.0), isOn: true },  // rgb(255, 255, 0) - [Source 1]
+    { position: vec3.fromValues( (poolDimension/2)-4,   2.0,    0.0),                   color: vec3.fromValues(0.5, 1.0, 0.5), isOn: true },  // rgb(127, 255, 127) - [Source 1]
+    { position: vec3.fromValues( (poolDimension/2)-4,   2.0,   -(poolDimension/2)+4),   color: vec3.fromValues(0.0, 0.0, 1.0), isOn: true },  // rgb(0, 0, 255) - [Source 1]
+    { position: vec3.fromValues( 0.0,                   2.0,   -(poolDimension/2)+4),   color: vec3.fromValues(0.2, 0.1, 0.4), isOn: true },  // rgb(46, 43, 95) - [Source 1]
+    { position: vec3.fromValues(-(poolDimension/2)+4,   2.0,   -(poolDimension/2)+4),   color: vec3.fromValues(0.5, 0.0, 1.0), isOn: true },  // rgb(139, 0, 255) - [Source 1]
+    { position: vec3.fromValues(-(poolDimension/2)+4,   2.0,    0.0),                   color: vec3.fromValues(0.9, 1.0, 0.5), isOn: true },  // rgba(224, 255, 141, 1) - [Source 1]
 ];
 
 // To upload an object in the scene
