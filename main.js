@@ -484,7 +484,7 @@ canvas.addEventListener('mousedown', (e) =>{
     const rect = canvas.getBoundingClientRect();
     const normalizedX = (e.clientX - rect.left) / rect.width;
     const normalizedY = (e.clientY - rect.top) / rect.height;
-    mousePos = [1.0 - normalizedX, 1.0 - normalizedY]; 
+    mousePos = [normalizedX, normalizedY]; 
     mouseForce = force;   // Apply force when clicking - value from slider
 });
 canvas.addEventListener('mouseup', () =>{
