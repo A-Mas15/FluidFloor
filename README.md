@@ -40,7 +40,7 @@ This document outlines the progress for a real-time fluid simulation project bui
      - Fresnel-based blending of **skybox** reflections (`samplerCube u_skybox`).
    - **Skybox** drawn first with `skyboxProgram` (vertex: `skyboxVS.glsl`, fragment: `skyboxFS.glsl`) using depth func **LEQUAL**.
 
-## Interactive coloured lighting (Phase 2)
+## Interactive coloured torches (Phase 2)
 This phase focuses on enhancing the scene's realism and interactivity by introducing dynamic, user-controlled point lights.
 
 1. **Multiple point lights**
