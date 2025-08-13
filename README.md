@@ -76,5 +76,5 @@ The project will now proceed to the next planned features:
 
 # References
 [Source 1] https://www.w3schools.com/colors/colors_converter.asp (colour converter, from hex to rgb)
+
 [Source 2] TO RECOVER (image for the skybox)
-[Source 3] https://free3d.com/3d-model/beach-ball-v2--259926.html (beach ball)
