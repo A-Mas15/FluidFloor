@@ -56,10 +56,34 @@ This phase focuses on enhancing the scene's realism and interactivity by introdu
 3. **Dynamic reflections**
 	- The reflections on the water are now more dynamic. The specular highlights from the Blinn-Phong model correctly reflect the color, position, and intensity of each active torch.
 	- This creates a much more vibrant and visually complex scene, especially as the water ripples and distorts the colored reflections.
+
+## Interactive physics ball (Phase 3)
+This phase introduces a fully interactive and deformable physics-based ball that integrates with the existing fluid simulation.
+1. **Mass-spring system**
+   - The ball's physics is implemented in the PhysicsBall class and is based on a mass-spring system.
+   - The initSprings() method builds a network of springs connecting adjacent vertices of the loaded .obj model, allowing the ball to deform realistically.
+   - The simulation, handled in SimTimeStep(), uses Euler integration to update vertex positions and velocities, applying forces for gravity, elasticity (Hooke's law), and damping.
+2. **Deformable mesh and rendering**
+   - Since the ball is deformable, its vertex data changes every frame.
+   - The updateMeshBuffers() method is called each simulation step to dynamically recalculate both the position buffer (vbo) and the normal buffer (nbo). Per-frame normal recalculation is crucial for ensuring correct lighting on the deformed surface.
+   - The ball is rendered with its own dedicated shader program (ballVS.glsl, ballFS.glsl).
+3. **User interaction**
+   - The user can grab and drag any vertex of the ball.
+   - On mousedown, the findClosestVertex() function identifies the vertex nearest to the cursor.
+   - The startDrag, updateDrag, and endDrag methods handle the interaction logic, allowing the user to pull and stretch the ball dynamically.
+4. **Water interaction**
+   - The ball and water interact with each other.
+   - The onBallCollision() callback function is triggered whenever a ball vertex drops below the water level.
+   - This function calculates an impactForce based on the collision velocity and uses the same mechanism as a mouse click (u_mousePos, u_mouseForce) to generate a wave at the point of impact, creating a seamless integration between the two simulation systems.
 ## Next Steps
 
 The project will now proceed to the next planned features:
--   **Step 3: interactive physics ball:** introduce a deformable, bouncing ball based on a mass-spring system that also creates waves upon impact.
+-   **Step 3: interactive physics ball:** insert sliders to modify the ball's:
+   - gravity;
+   - mass;
+   - stiffness;
+   - damping.
+
 -   **Step 4: swimming pool:** add a recessed "pool" area and a simple, procedurally animated character that can swim in it.
 
 ## How to Run

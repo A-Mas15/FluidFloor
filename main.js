@@ -1,21 +1,18 @@
 // Global variables and constants
-const { mat4, vec3, vec4 } = glMatrix;    // Exstract mat4 e vec3 from glMatrix
+//const { mat4, vec3, vec4 } = glMatrix;    // Exstract mat4 e vec3 from glMatrix
 
 const floorSegments = 128; 
 const simResolution = 256; 
 const poolDimension = 60.0;         // Pool dimensions
 const MAX_LIGHTS = 8;               // Max number of torches
 const TEAPOT_SCALE = 2.0;           // Scale to draw teapots
-
-let torchGeometry = null;
-let torchProgram, torchAttribs, torchUniforms;
-let torchPositionBuffer, torchIndexBuffer;
-let torchModelRadius = 0.5;
-
-// Matrices for picking
-let lastProjectionMatrix = mat4.create();
-let lastViewMatrix = mat4.create();
-
+// Programs, attributes and uniforms
+let renderProgram, renderAttribs, renderUniforms;
+let simProgram, simAttribs, simUniforms;
+let skyboxProgram, skyboxAttribs, skyboxUniforms;
+let positionBuffer, uvBuffer, floorIndexBuffer, quadBuffer, skyboxBuffer, skyboxIndexBuffer;
+let skyboxIndices, skyboxVertices;
+let floorGeometry,quadPositions;
 // To add checkbox and slider
 const reflectionCheckbox = document.getElementById('reflection-checkbox');
 const dampingSlider = document.getElementById('damping-slider');
@@ -30,6 +27,46 @@ const gl = canvas.getContext('webgl');
 if (!gl) {
 	throw new Error("[INIT] Unable to initialize WebGL. Your browser or machine may not support it.");
 }
+
+// Add sky
+let skyboxTexture = null;
+
+// Objects path 
+const skyboxURL = '/skybox/Untitled.png';
+const teapotURL = 'teapot.obj';
+const ballURL = 'BlenderModels/Sphere2.obj';
+
+// Variables to control camera
+let cameraPosition = vec3.fromValues(0, 2, 15); // Starting psoition
+let cameraYaw = 0.0;                            //  Horizzontal rotation
+let cameraPitch = 0.0;                          // Vertical rotation
+const keysPressed = {};                         // List of pressed keys
+let lastMouseX = 0;                             // Last position of the mouse on the x axis
+let lastMouseY = 0;                             // Last position of the mouse on the y axis
+let isMouseDown = false;
+let mousePos = [-1, -1];                        // Start with mouse outside of camera
+let mouseForce = 0;                             // Mouse is not applying force at the begenning
+let force = 0.3;                                // Starting mouse forced
+let damping = 0.985;                            // Damping 
+let lastTime = 0;                               // Time in seconds
+let fov_degrees = 45.0;                         // Field of View in degrees °
+let stateA, stateB;
+
+// Torches
+let torchGeometry = null;
+let torchProgram, torchAttribs, torchUniforms;
+let torchPositionBuffer, torchIndexBuffer;
+let torchModelRadius = 0.5;
+
+// Matrices for picking
+let vpMatrix = mat4.create();
+let lastProjectionMatrix = mat4.create();
+let lastViewMatrix = mat4.create();
+
+// For ball physics
+let physicsBall = null;
+let ballProgram, ballAttribs, ballUniforms;
+let isDraggingBall = false;
 
 // Shaders
 const renderVS = `
@@ -216,6 +253,391 @@ const torchFS = `
     }
 `;
 
+const ballVS = `
+    attribute vec3 a_position;
+    attribute vec3 a_normal;
+    uniform mat4 u_mvp;
+     uniform mat3 u_normalMatrix;
+    varying vec3 v_normal;
+    void main() {
+        gl_Position = u_mvp * vec4(a_position, 1.0);
+        v_normal = normalize(u_normalMatrix * a_normal);
+    }
+`;
+
+const ballFS = `
+    precision mediump float;
+    varying vec3 v_normal;
+    uniform vec3 u_lightDir;
+    void main() {
+        vec3 N = normalize(v_normal);
+        vec3 L = normalize(u_lightDir);
+        float diffuse = max(dot(N, L), 0.0);
+        vec3 color = vec3(0.9, 0.7, 0.2) * (0.3 + diffuse * 0.7);
+        gl_FragColor = vec4(color, 1.0);
+    }
+`;
+
+// Main
+async function main(){
+    gl.enable(gl.DEPTH_TEST);
+    // Extensions for FBO
+    const floatLinearExt = gl.getExtension('OES_texture_float_linear');
+    const floatTextureExt = gl.getExtension('OES_texture_float');
+    if(!floatTextureExt){
+        throw new Error("[INIT] Unable to add float texture. Your browser or machine may not support it.");
+    }
+    // Floor geometry
+    floorGeometry = createFloorGeometry(poolDimension, poolDimension, floorSegments, floorSegments);
+    quadPositions = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
+    // Skybox
+    // Create a cubemap to have the sky
+    skyboxVertices = new Float32Array([
+        //   X,    Y,    Z
+        -1.0, -1.0,  1.0, // 0
+        1.0, -1.0,  1.0, // 1
+        -1.0,  1.0,  1.0, // 2
+        1.0,  1.0,  1.0, // 3
+        -1.0, -1.0, -1.0, // 4
+        1.0, -1.0, -1.0, // 5
+        -1.0,  1.0, -1.0, // 6
+        1.0,  1.0, -1.0, // 7
+    ]);
+
+    skyboxIndices = new Uint16Array([
+        // Positive Z
+        0, 1, 2,   2, 1, 3,
+        // Positive X
+        1, 5, 3,   3, 5, 7,
+        // Negative Z
+        5, 4, 7,   7, 4, 6,
+        // Negative X
+        4, 0, 6,   6, 0, 2,
+        // Positive Y
+        2, 3, 6,   6, 3, 7,
+        // Negative Y
+        4, 5, 0,   0, 5, 1,
+    ]);
+    // Buffers
+    positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, floorGeometry.positions, gl.STATIC_DRAW);
+
+    uvBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, floorGeometry.uvs, gl.STATIC_DRAW);
+
+    indexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, floorGeometry.indices, gl.STATIC_DRAW);
+
+    quadBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, quadPositions, gl.STATIC_DRAW);
+
+    skyboxBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, skyboxBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, skyboxVertices, gl.STATIC_DRAW);
+
+    skyboxIndexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, skyboxIndexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, skyboxIndices, gl.STATIC_DRAW);
+    // Render program
+    renderProgram = createProgram(gl, 
+        createShader(gl, gl.VERTEX_SHADER, renderVS),
+        createShader(gl, gl.FRAGMENT_SHADER, renderFS)
+    );
+    
+    renderAttribs = {
+        position: gl.getAttribLocation(renderProgram, 'a_position'),
+        uv: gl.getAttribLocation(renderProgram, 'a_uv'), 
+    };
+    renderUniforms = {
+        modelMatrix: gl.getUniformLocation(renderProgram, 'u_modelMatrix'),
+        vp: gl.getUniformLocation(renderProgram, 'u_vp'),
+        cameraPos: gl.getUniformLocation(renderProgram, 'u_cameraPos'),
+        heightMap: gl.getUniformLocation(renderProgram, 'u_heightMap'), 
+        pixelSize: gl.getUniformLocation(renderProgram, 'u_pixelSize'), 
+        lightPositions: [],
+        lightColors: [],
+        showReflections: gl.getUniformLocation(renderProgram, 'u_showReflections'),
+        skybox: gl.getUniformLocation(renderProgram, 'u_skybox'),
+        poolDimension: gl.getUniformLocation(renderProgram, 'u_poolDimension'),
+    };
+    // Add uniform
+    for(let i = 0; i < MAX_LIGHTS; i++){
+        renderUniforms.lightPositions.push(gl.getUniformLocation(renderProgram, `u_lightPositions[${i}]`));
+        renderUniforms.lightColors.push(gl.getUniformLocation(renderProgram, `u_lightColors[${i}]`));
+    }
+    simProgram = createProgram(gl,
+        createShader(gl, gl.VERTEX_SHADER, simulationVS),
+        createShader(gl, gl.FRAGMENT_SHADER, simulationFS)
+    );
+    simAttribs = {
+        position: gl.getAttribLocation(simProgram, 'a_position'),
+    };
+    simUniforms = {
+        state: gl.getUniformLocation(simProgram, 'u_state'),
+        pixelSize: gl.getUniformLocation(simProgram, 'u_pixelSize'),
+        mousePos: gl.getUniformLocation(simProgram, 'u_mousePos'),
+        mouseForce: gl.getUniformLocation(simProgram, 'u_mouseForce'),
+        damping: gl.getUniformLocation(simProgram, 'u_damping'),
+    };
+    
+    skyboxProgram = createProgram(gl,
+        createShader(gl, gl.VERTEX_SHADER, skyboxVS),
+        createShader(gl, gl.FRAGMENT_SHADER, skyboxFS)
+    );
+    skyboxAttribs = {
+        position: gl.getAttribLocation(skyboxProgram, 'a_position'),
+    };
+    skyboxUniforms = {
+        projectionMatrix: gl.getUniformLocation(skyboxProgram, 'u_projectionMatrix'),
+        viewMatrix: gl.getUniformLocation(skyboxProgram, 'u_viewMatrix'),
+        skybox: gl.getUniformLocation(skyboxProgram, 'u_skybox'),
+    };
+
+    // FBO setup for simulation
+    stateA = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.FLOAT);
+    stateB = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.FLOAT);
+
+    // Load resources (sky, torches, ball)
+    loadCubeMap(gl, skyboxURL, (texture) => {
+        skyboxTexture = texture;
+    });
+    await setupTorchModel(teapotURL);
+    await setupBallModel(ballURL);
+
+    // Event listeners
+    setupEventListeners();
+    // Start the rendering loop
+    requestAnimationFrame(render);
+}
+
+
+// Main rendering loop
+function render(currentTime) {
+    const deltaTime = (currentTime - (lastTime || currentTime)) / 1000.0;
+    lastTime = currentTime;
+
+    // UpdateCamera
+    updateCamera(deltaTime);
+    if (physicsBall) {
+        physicsBall.simTimeStep(deltaTime, onBallCollision);
+    }
+
+    // Simulation step
+    runSimulationStep();
+
+    // Draw
+    drawScene();
+
+    // Go to next frame
+    requestAnimationFrame(render);
+}
+
+// Simulation step
+function runSimulationStep(){
+    gl.useProgram(simProgram);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, stateB.fbo);
+    gl.viewport(0, 0, simResolution, simResolution);
+
+    // Import texture for waves
+    gl.activeTexture(gl.TEXTURE0);                      // Texture 0 is water texture
+    gl.bindTexture(gl.TEXTURE_2D, stateA.texture);
+    gl.uniform1i(simUniforms.state, 0);
+    
+    // Uniforms
+    gl.uniform2f(simUniforms.pixelSize, 1 / simResolution, 1 / simResolution);
+    gl.uniform2fv(simUniforms.mousePos, mousePos);
+    gl.uniform1f(simUniforms.mouseForce, mouseForce);
+    gl.uniform1f(simUniforms.damping, damping);
+    
+    // Quad
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+    gl.enableVertexAttribArray(simAttribs.position);
+    gl.vertexAttribPointer(simAttribs.position, 2, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    mouseForce = 0; // After having applied it, reste forces
+    [stateA, stateB] = [stateB, stateA]; // Swap buffers
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+// Draw
+function drawScene(){
+    // Clean canvas
+    resizeCanvas();
+    gl.clearColor(0.0, 0.0, 0.0, 1.0); // rgba 
+    gl.clear(gl.COLOR_BUFFER_BIT| gl.DEPTH_BUFFER_BIT);
+    
+    // Matrices
+    // Projection matrix
+    const projectionMatrix = mat4.create();
+    mat4.perspective(projectionMatrix, fov_degrees * Math.PI / 180, gl.canvas.clientWidth / gl.canvas.clientHeight, 0.1, 100.0);
+    // View matrix - dynamic since it needs to change while the user is moving
+    const viewMatrix = mat4.create();
+    const cameraTarget = mat4.create();
+    const forward = vec3.fromValues(Math.sin(cameraYaw), Math.sin(cameraPitch), Math.cos(cameraYaw));
+    vec3.normalize(forward, forward);
+    vec3.add(cameraTarget, cameraPosition, forward);
+    mat4.lookAt(viewMatrix, cameraPosition, cameraTarget, [0, 1, 0]);
+    // Model matrix
+    const modelMatrix = mat4.create();
+    // View projection matrix
+    mat4.multiply(vpMatrix, projectionMatrix, viewMatrix);
+    mat4.copy(lastProjectionMatrix, projectionMatrix);
+    mat4.copy(lastViewMatrix, viewMatrix);
+    
+    // Draw skybox
+    if (skyboxTexture) {
+        gl.depthFunc(gl.LEQUAL);
+        gl.useProgram(skyboxProgram);
+        gl.uniformMatrix4fv(skyboxUniforms.projectionMatrix, false, projectionMatrix);
+        gl.uniformMatrix4fv(skyboxUniforms.viewMatrix, false, viewMatrix);
+        gl.activeTexture(gl.TEXTURE1);                                                      // Texture 1 is skybox texture
+        gl.bindTexture(gl.TEXTURE_CUBE_MAP, skyboxTexture);
+        gl.uniform1i(skyboxUniforms.skybox, 1);
+        gl.bindBuffer(gl.ARRAY_BUFFER, skyboxBuffer);
+        gl.enableVertexAttribArray(skyboxAttribs.position);
+        gl.vertexAttribPointer(skyboxAttribs.position, 3, gl.FLOAT, false, 0, 0);        
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, skyboxIndexBuffer);
+        gl.drawElements(gl.TRIANGLES, skyboxIndices.length, gl.UNSIGNED_SHORT, 0);
+        gl.depthFunc(gl.LESS);
+    }
+    
+    // Draw water texture
+    gl.useProgram(renderProgram);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, stateA.texture);
+    gl.uniform1i(renderUniforms.heightMap, 0);
+    // Connect cubemap to texture unit 1
+    if (skyboxTexture) {
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_CUBE_MAP, skyboxTexture);
+        gl.uniform1i(renderUniforms.skybox, 1);
+    }
+    // Send matrices
+    gl.uniformMatrix4fv(renderUniforms.modelMatrix, false, modelMatrix);
+    gl.uniformMatrix4fv(renderUniforms.vp, false, vpMatrix);
+    gl.uniform3fv(renderUniforms.cameraPos, cameraPosition);
+    gl.uniform2f(renderUniforms.pixelSize, 1 / simResolution, 1 / simResolution);
+    gl.uniform1f(renderUniforms.poolDimension, poolDimension);
+    // Connect texture to checkbox
+    gl.uniform1i(renderUniforms.showReflections, reflectionCheckbox.checked);
+    
+    // Add the teapots
+    for (let i = 0; i < MAX_LIGHTS; i++) {
+        const src = teapotSources[i];
+        if (src && src.isOn) {
+            gl.uniform3fv(renderUniforms.lightPositions[i], src.position);
+            gl.uniform3fv(renderUniforms.lightColors[i],  src.color);
+        } else if (src) {
+            gl.uniform3fv(renderUniforms.lightPositions[i], src.position);
+            gl.uniform3fv(renderUniforms.lightColors[i],  vec3.fromValues(0.0, 0.0, 0.0));
+        } else {
+            // Empty slots
+            gl.uniform3fv(renderUniforms.lightPositions[i], vec3.fromValues(0.0, -9999.0, 0.0));
+            gl.uniform3fv(renderUniforms.lightColors[i],    vec3.fromValues(0.0, 0.0, 0.0));
+        }
+    }
+    // Floor geometry
+    gl.enableVertexAttribArray(renderAttribs.position);
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.vertexAttribPointer(renderAttribs.position, 3, gl.FLOAT, false, 0, 0);
+
+    gl.enableVertexAttribArray(renderAttribs.uv);
+    gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
+    gl.vertexAttribPointer(renderAttribs.uv, 2, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+    gl.drawElements(gl.TRIANGLES, floorGeometry.indices.length, gl.UNSIGNED_SHORT, 0);
+
+    // Draw the torches
+    if (torchGeometry) {
+        gl.useProgram(torchProgram);
+        gl.bindBuffer(gl.ARRAY_BUFFER, torchPositionBuffer);
+        gl.enableVertexAttribArray(torchAttribs.position);
+        gl.vertexAttribPointer(torchAttribs.position, 3, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, torchIndexBuffer);
+        gl.uniformMatrix4fv(torchUniforms.vp, false, vpMatrix);
+
+        teapotSources.forEach(src => {
+            const modelMatrix = mat4.create();
+            mat4.translate(modelMatrix, modelMatrix, src.position);
+            mat4.scale(modelMatrix, modelMatrix, [TEAPOT_SCALE, TEAPOT_SCALE, TEAPOT_SCALE]); // scala modello
+            gl.uniformMatrix4fv(torchUniforms.modelMatrix, false, modelMatrix);
+
+            // colore acceso/spento
+            const off = vec3.fromValues(0.25, 0.25, 0.25);      //rgb(63, 63, 63)
+            gl.uniform3fv(torchUniforms.color, src.isOn ? src.color : off);
+
+            gl.drawElements(gl.TRIANGLES, torchGeometry.indices.length, gl.UNSIGNED_SHORT, 0);
+        });
+    }
+    // Draw the ball
+    if (physicsBall && ballProgram) {
+        gl.useProgram(ballProgram);
+        const modelMatrix = mat4.create();
+        const mvp = mat4.create();
+        mat4.multiply(mvp, vpMatrix, modelMatrix);
+        const normalMatrix = mat3.create();
+        mat3.fromMat4(normalMatrix, modelMatrix);
+        mat3.invert(normalMatrix, normalMatrix);
+        mat3.transpose(normalMatrix, normalMatrix);
+
+        gl.uniformMatrix4fv(ballUniforms.mvp, false, mvp);
+        gl.uniformMatrix3fv(ballUniforms.normalMatrix, false, normalMatrix);
+        gl.uniform3f(ballUniforms.lightDir, 0.577, 0.577, 0.577);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, physicsBall.buffers.vbo);
+        gl.vertexAttribPointer(ballAttribs.position, 3, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(ballAttribs.position);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, physicsBall.buffers.nbo);
+        gl.vertexAttribPointer(ballAttribs.normal, 3, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(ballAttribs.normal);
+
+        gl.drawArrays(gl.TRIANGLES, 0, physicsBall.buffers.numVertices);
+    }
+}
+
+function updateCamera(deltaTime){
+    //const deltaTime = (currentTime - lastTime)/1000;    // Time in seconds
+    //lastTime = currentTime;
+    const speed = 5.0 * deltaTime;  
+    // Determines movement based on yaw
+    const forward = vec3.fromValues(Math.sin(cameraYaw), 0, Math.cos(cameraYaw));
+    const right = vec3.fromValues(forward[2], 0, -forward[0]);
+
+    // Move by pressing keybord
+    if (keysPressed['KeyW']) {
+        vec3.scaleAndAdd(cameraPosition, cameraPosition, forward, speed);
+    }
+    if (keysPressed['KeyA']) {
+        vec3.scaleAndAdd(cameraPosition, cameraPosition, right, speed);
+    }
+    if (keysPressed['KeyS']) {
+        vec3.scaleAndAdd(cameraPosition, cameraPosition, forward, -speed);
+    }
+    if (keysPressed['KeyD']) {
+        vec3.scaleAndAdd(cameraPosition, cameraPosition, right, -speed);
+    }
+}
+
+// How to deal with collision of the ball
+function onBallCollision(position, velocity) {
+    const impactForce = Math.min(Math.abs(velocity[1]) * 0.2, 0.8);
+    if (impactForce < 0.02) return;
+    const waterUV_x = (position[0] / poolDimension) + 0.5;
+    const waterUV_y = (position[2] / poolDimension) + 0.5;
+    if (waterUV_x >= 0 && waterUV_x <= 1 && waterUV_y >= 0 && waterUV_y <= 1) {
+        mousePos = [waterUV_x, waterUV_y];
+        mouseForce = impactForce;
+    }
+}
+
 // Helper functions
 function createShader(gl, type, source){
     const shader = gl.createShader(type);
@@ -241,99 +663,49 @@ function createProgram(gl, vertexShader, fragmentShader){
     console.error(gl.getProgramInfoLog(program));
     gl.deleteProgram(program);
 }
+ 
+function loadCubeMap(gl, imageUrl, callback) {
+    const image = new Image();
+    // image.crossOrigin = "anonymous"; // Has to do with accesses
+    image.src = imageUrl;
 
-// Create a cubemap to have the sky
-const skyboxVertices = new Float32Array([
-    //   X,    Y,    Z
-    -1.0, -1.0,  1.0, // 0
-     1.0, -1.0,  1.0, // 1
-    -1.0,  1.0,  1.0, // 2
-     1.0,  1.0,  1.0, // 3
-    -1.0, -1.0, -1.0, // 4
-     1.0, -1.0, -1.0, // 5
-    -1.0,  1.0, -1.0, // 6
-     1.0,  1.0, -1.0, // 7
-]);
+    image.addEventListener('load', () => {
+        const faceSize = image.width / 4; 
 
-const skyboxIndices = new Uint16Array([
-    // Positive Z
-    0, 1, 2,   2, 1, 3,
-    // Positive X
-    1, 5, 3,   3, 5, 7,
-    // Negative Z
-    5, 4, 7,   7, 4, 6,
-    // Negative X
-    4, 0, 6,   6, 0, 2,
-    // Positive Y
-    2, 3, 6,   6, 3, 7,
-    // Negative Y
-    4, 5, 0,   0, 5, 1,
-]);
- 
- function loadCubeMap(gl, imageUrl, callback) {
-     const image = new Image();
-     // image.crossOrigin = "anonymous"; // Has to do with accesses
-     image.src = imageUrl;
- 
-     image.addEventListener('load', () => {
-         const faceSize = image.width / 4; 
- 
-         // Create a temporary canvas to cut the image
-         const tempCanvas = document.createElement('canvas');
-         tempCanvas.width = faceSize;
-         tempCanvas.height = faceSize;
-         const ctx = tempCanvas.getContext('2d');
- 
-         const texture = gl.createTexture();
-         gl.bindTexture(gl.TEXTURE_CUBE_MAP, texture);
- 
-         const faceInfos = [
-             { target: gl.TEXTURE_CUBE_MAP_POSITIVE_X, x: 2 * faceSize, y: 1 * faceSize },
-             { target: gl.TEXTURE_CUBE_MAP_NEGATIVE_X, x: 0 * faceSize, y: 1 * faceSize },
-             { target: gl.TEXTURE_CUBE_MAP_POSITIVE_Y, x: 1 * faceSize, y: 0 * faceSize },
-             { target: gl.TEXTURE_CUBE_MAP_NEGATIVE_Y, x: 1 * faceSize, y: 2 * faceSize },
-             { target: gl.TEXTURE_CUBE_MAP_POSITIVE_Z, x: 1 * faceSize, y: 1 * faceSize },
-             { target: gl.TEXTURE_CUBE_MAP_NEGATIVE_Z, x: 3 * faceSize, y: 1 * faceSize },
-         ];
- 
-         faceInfos.forEach((faceInfo) => {
-             const { target, x, y } = faceInfo;
-             
-             // Draw and upload the cut-up image on the cubemap
-             ctx.drawImage(image, x, y, faceSize, faceSize, 0, 0, faceSize, faceSize);
-             gl.texImage2D(target, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, tempCanvas);
-         });
- 
-         gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
-         gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-         
-         if (callback) callback(texture);
-     });
- 
-     return gl.createTexture();
- }
+        // Create a temporary canvas to cut the image
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = faceSize;
+        tempCanvas.height = faceSize;
+        const ctx = tempCanvas.getContext('2d');
 
-// Extensions for FBO
-const floatLinearExt = gl.getExtension('OES_texture_float_linear');
-const floatTextureExt = gl.getExtension('OES_texture_float');
-if(!floatTextureExt){
-    throw new Error("[INIT] Unable to add float texture. Your browser or machine may not support it.");
+        const texture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_CUBE_MAP, texture);
+
+        const faceInfos = [
+            { target: gl.TEXTURE_CUBE_MAP_POSITIVE_X, x: 2 * faceSize, y: 1 * faceSize },
+            { target: gl.TEXTURE_CUBE_MAP_NEGATIVE_X, x: 0 * faceSize, y: 1 * faceSize },
+            { target: gl.TEXTURE_CUBE_MAP_POSITIVE_Y, x: 1 * faceSize, y: 0 * faceSize },
+            { target: gl.TEXTURE_CUBE_MAP_NEGATIVE_Y, x: 1 * faceSize, y: 2 * faceSize },
+            { target: gl.TEXTURE_CUBE_MAP_POSITIVE_Z, x: 1 * faceSize, y: 1 * faceSize },
+            { target: gl.TEXTURE_CUBE_MAP_NEGATIVE_Z, x: 3 * faceSize, y: 1 * faceSize },
+        ];
+
+        faceInfos.forEach((faceInfo) => {
+            const { target, x, y } = faceInfo;
+            
+            // Draw and upload the cut-up image on the cubemap
+            ctx.drawImage(image, x, y, faceSize, faceSize, 0, 0, faceSize, faceSize);
+            gl.texImage2D(target, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, tempCanvas);
+        });
+
+        gl.generateMipmap(gl.TEXTURE_CUBE_MAP);
+        gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        
+        if (callback) callback(texture);
+    });
+
+    return gl.createTexture();
 }
-
-// Variables to control camera
-let cameraPosition = vec3.fromValues(0, 2, 15); // Starting psoition
-let cameraYaw = 0.0;                            //  Horizzontal rotation
-let cameraPitch = 0.0;                          // Vertical rotation
-const keysPressed = {};                         // List of pressed keys
-let lastMouseX = 0;                             // Last position of the mouse on the x axis
-let lastMouseY = 0;                             // Last position of the mouse on the y axis
-let isMouseDown = false;
-let mousePos = [-1, -1];                        // Start with mouse outside of camera
-let mouseForce = 0;                             // Mouse is not applying force at the begenning
-let force = 0.3;                                // Starting mouse forced
-let damping = 0.985;                            // Damping 
-let lastTime = 0;                               // Time in seconds
-let fov_degrees = 45.0;                         // Field of View in degrees °
 
 // Adapt canvas size to window dimensions
 function resizeCanvas(){
@@ -341,16 +713,9 @@ function resizeCanvas(){
     canvas.height = window.innerHeight;
     gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
 }
-window.addEventListener('resize', resizeCanvas);
-resizeCanvas();
 
-// Add sky
-let skyboxTexture = null;
-// Image path 
-const skyboxUrls = '/skybox/Untitled.png';
-loadCubeMap(gl, skyboxUrls, (texture) => {
-    skyboxTexture = texture;
-});
+
+function setupEventListeners(){
 
 // Event listener for sliders
 dampingSlider.addEventListener('input', (e) =>{
@@ -361,109 +726,33 @@ forceSlider.addEventListener('input', (e) =>{
     force = e.target.value/ 100.0;
     forceValueSpan.textContent = force.toFixed(2);
 });
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
 
-// Floor geometry
-gl.enable(gl.DEPTH_TEST);
-const floorGeometry = createFloorGeometry(poolDimension, poolDimension, floorSegments, floorSegments);
-const quadPositions = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
-
-// Buffers
-const positionBuffer = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-gl.bufferData(gl.ARRAY_BUFFER, floorGeometry.positions, gl.STATIC_DRAW);
-
-const uvBuffer = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
-gl.bufferData(gl.ARRAY_BUFFER, floorGeometry.uvs, gl.STATIC_DRAW);
-
-const indexBuffer = gl.createBuffer();
-gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, floorGeometry.indices, gl.STATIC_DRAW);
-
-const quadBuffer = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
-gl.bufferData(gl.ARRAY_BUFFER, quadPositions, gl.STATIC_DRAW);
-
-const skyboxBuffer = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, skyboxBuffer);
-gl.bufferData(gl.ARRAY_BUFFER, skyboxVertices, gl.STATIC_DRAW);
-
-const skyboxIndexBuffer = gl.createBuffer();
-gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, skyboxIndexBuffer);
-gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, skyboxIndices, gl.STATIC_DRAW);
-
-// Render program
-const renderProgram = createProgram(gl, 
-    createShader(gl, gl.VERTEX_SHADER, renderVS),
-    createShader(gl, gl.FRAGMENT_SHADER, renderFS)
-);
-
-const renderAttribs = {
-    position: gl.getAttribLocation(renderProgram, 'a_position'),
-    uv: gl.getAttribLocation(renderProgram, 'a_uv'), 
-};
-const renderUniforms = {
-    modelMatrix: gl.getUniformLocation(renderProgram, 'u_modelMatrix'),
-    vp: gl.getUniformLocation(renderProgram, 'u_vp'),
-    cameraPos: gl.getUniformLocation(renderProgram, 'u_cameraPos'),
-    heightMap: gl.getUniformLocation(renderProgram, 'u_heightMap'), 
-    pixelSize: gl.getUniformLocation(renderProgram, 'u_pixelSize'), 
-    lightPositions: [],
-    lightColors: [],
-    showReflections: gl.getUniformLocation(renderProgram, 'u_showReflections'),
-    skybox: gl.getUniformLocation(renderProgram, 'u_skybox'),
-    poolDimension: gl.getUniformLocation(renderProgram, 'u_poolDimension'),
-};
-// Add uniform
-for(let i = 0; i < MAX_LIGHTS; i++){
-    renderUniforms.lightPositions.push(gl.getUniformLocation(renderProgram, `u_lightPositions[${i}]`));
-    renderUniforms.lightColors.push(gl.getUniformLocation(renderProgram, `u_lightColors[${i}]`));
-}
-const simProgram = createProgram(gl,
-    createShader(gl, gl.VERTEX_SHADER, simulationVS),
-    createShader(gl, gl.FRAGMENT_SHADER, simulationFS)
-);
-const simAttribs = {
-    position: gl.getAttribLocation(simProgram, 'a_position'),
-};
-const simUniforms = {
-    state: gl.getUniformLocation(simProgram, 'u_state'),
-    pixelSize: gl.getUniformLocation(simProgram, 'u_pixelSize'),
-    mousePos: gl.getUniformLocation(simProgram, 'u_mousePos'),
-    mouseForce: gl.getUniformLocation(simProgram, 'u_mouseForce'),
-    damping: gl.getUniformLocation(simProgram, 'u_damping'),
-};
-
-const skyboxProgram = createProgram(gl,
-    createShader(gl, gl.VERTEX_SHADER, skyboxVS),
-    createShader(gl, gl.FRAGMENT_SHADER, skyboxFS)
-);
-const skyboxAttribs = {
-    position: gl.getAttribLocation(skyboxProgram, 'a_position'),
-};
-const skyboxUniforms = {
-    projectionMatrix: gl.getUniformLocation(skyboxProgram, 'u_projectionMatrix'),
-    viewMatrix: gl.getUniformLocation(skyboxProgram, 'u_viewMatrix'),
-    skybox: gl.getUniformLocation(skyboxProgram, 'u_skybox'),
-};
-
-// FBO setup for simulation
-let stateA = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.FLOAT);
-let stateB = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.FLOAT);
-
-
-// Event listeners 
 canvas.addEventListener('mousedown', (e) =>{
     isMouseDown = true;
-    lastMouseX = e.clientX;
-    lastMouseY = e.clientY;
-    
+    // Some mapping  is necessary since there is a discrpancy in the center
+    const rect = canvas.getBoundingClientRect();
+    const normalizedX = (e.clientX - rect.left) / rect.width;
+    const normalizedY = (e.clientY - rect.top) / rect.height;
+
+    // To pick at the object
+    const mouseX_clip = normalizedX * 2 - 1;
+    const mouseY_clip = (1.0 - normalizedY) * 2 - 1;
+        
+    // To deal with ball physics
+    if (physicsBall) {
+        physicsBall.findClosestVertex([mouseX_clip, mouseY_clip], vpMatrix);
+        if (physicsBall.startDrag([mouseX_clip, mouseY_clip], vpMatrix)) {
+            isDraggingBall = true;
+            return;
+        }
+    }
     // To turn on/off the lights
     const { origin, dir } = makeRayFromScreen(
         e.clientX, e.clientY, 
         lastProjectionMatrix, lastViewMatrix
-    );
-
+    );   
     const hitRadius = torchModelRadius * TEAPOT_SCALE * 2.0;
     let hitIndex = -1, bestT = Number.POSITIVE_INFINITY;
 
@@ -479,26 +768,40 @@ canvas.addEventListener('mousedown', (e) =>{
         teapotSources[hitIndex].isOn = !teapotSources[hitIndex].isOn;
         return; // return: do not generate a wave
     }
-    // To create waves
-    // Some mapping  is necessary since there is a discrpancy in the center
-    const rect = canvas.getBoundingClientRect();
-    const normalizedX = (e.clientX - rect.left) / rect.width;
-    const normalizedY = (e.clientY - rect.top) / rect.height;
-    mousePos = [normalizedX, normalizedY]; 
-    mouseForce = force;   // Apply force when clicking - value from slider
+
+    // Generate a wave
+    mousePos = [1.0 - normalizedX, 1.0 - normalizedY];
+    mouseForce = force;   // Generate waves when clicking - value from slider     
+    
 });
 canvas.addEventListener('mouseup', () =>{
     isMouseDown = false;
     mouseForce = 0;
     mousePos = [-1, -1];
-
+    if (isDraggingBall && physicsBall) {
+       physicsBall.endDrag();
+       isDraggingBall = false;
+    }
 });
 // Stop rotation if the mouse leaves the frame
 canvas.addEventListener('mouseleave', () => {
     isMouseDown = false;
+    if (isDraggingBall && physicsBall) {
+       physicsBall.endDrag();
+       isDraggingBall = false;
+    }
 });
 
 document.addEventListener('mousemove', (e) => {
+    // Ball
+    if (isDraggingBall && physicsBall) {
+        const rect = canvas.getBoundingClientRect();
+        const mouseX_clip = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        const mouseY_clip = (((e.clientY - rect.top) / rect.height) * -2 + 1);
+        physicsBall.updateDrag([mouseX_clip, mouseY_clip]);
+        return;
+    }
+    // Camera rotation
     if (document.pointerLockElement === canvas) {
         cameraYaw -= e.movementX * 0.002;
         cameraPitch -= e.movementY * 0.002;
@@ -506,11 +809,12 @@ document.addEventListener('mousemove', (e) => {
         const maxPitch = Math.PI / 2 - 0.1;
         cameraPitch = Math.max(-maxPitch, Math.min(maxPitch, cameraPitch));
     }
-    if (!isMouseDown) return;
-    const rect = canvas.getBoundingClientRect();
-    const normalizedX = (e.clientX - rect.left) / rect.width;
-    const normalizedY = (e.clientY - rect.top)  / rect.height;
-    mousePos = [normalizedX, 1.0 - normalizedY];
+    if (isMouseDown && !isDraggingBall) {
+        const rect = canvas.getBoundingClientRect();
+        const normalizedX = (e.clientX - rect.left) / rect.width;
+        const normalizedY = (e.clientY - rect.top)  / rect.height;
+        mousePos = [1.0 - normalizedX, 1.0- normalizedY];
+    }
 });
 canvas.addEventListener('wheel', (e) => {
     // e.deltaY positive when zooming out
@@ -529,157 +833,8 @@ window.addEventListener('keydown', (e) =>{
 window.addEventListener('keyup', (e) =>{
     keysPressed[e.code] = false;
 });
-
-
-// Main rendering loop
-function render(currentTime){
-    updateCamera(currentTime);
-    // Simulation step
-    gl.useProgram(simProgram);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, stateB.fbo);
-    gl.viewport(0, 0, simResolution, simResolution);
-
-    gl.activeTexture(gl.TEXTURE0);                      // Texture 0 is water texture
-    gl.bindTexture(gl.TEXTURE_2D, stateA.texture);
-    gl.uniform1i(simUniforms.state, 0);
-    
-    gl.uniform2f(simUniforms.pixelSize, 1 / simResolution, 1 / simResolution);
-    gl.uniform2fv(simUniforms.mousePos, mousePos);
-    gl.uniform1f(simUniforms.mouseForce, mouseForce);
-    gl.uniform1f(simUniforms.damping, damping);
-    //gl.uniform1f(renderUniforms.poolDimension, poolDimension);
-
-    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
-    gl.enableVertexAttribArray(simAttribs.position);
-    gl.vertexAttribPointer(simAttribs.position, 2, gl.FLOAT, false, 0, 0); 
-    
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
-    mouseForce = 0; // After having applied it, reste force
-    [stateA, stateB] = [stateB, stateA]; // Swap buffers
-
-    // Rendering step
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    // Clean canvas
-    resizeCanvas();
-    gl.clearColor(0.0, 0.0, 0.0, 1.0); // rgba 
-    gl.clear(gl.COLOR_BUFFER_BIT| gl.DEPTH_BUFFER_BIT);
-    
-    // Matrices
-    // Projection matrix
-    const projectionMatrix = mat4.create();
-    mat4.perspective(projectionMatrix, fov_degrees * Math.PI / 180, gl.canvas.clientWidth / gl.canvas.clientHeight, 0.1, 100.0);
-    // View matrix - dynamic since it needs to change while the user is moving
-    const viewMatrix = mat4.create();
-    const cameraTarget = mat4.create();
-    const forward = vec3.fromValues(Math.sin(cameraYaw), Math.sin(cameraPitch), Math.cos(cameraYaw));
-    vec3.normalize(forward, forward);
-    vec3.add(cameraTarget, cameraPosition, forward);
-    mat4.lookAt(viewMatrix, cameraPosition, cameraTarget, [0, 1, 0]);
-
-    // Model matrix
-    const modelMatrix = mat4.create();
-    // View projection matrix
-    const vpMatrix = mat4.create();
-    mat4.multiply(vpMatrix, projectionMatrix, viewMatrix);
-    mat4.copy(lastProjectionMatrix, projectionMatrix);
-    mat4.copy(lastViewMatrix, viewMatrix);
-    // Draw skybox
-    if (skyboxTexture) {
-        gl.depthFunc(gl.LEQUAL);
-        gl.useProgram(skyboxProgram);
-        gl.uniformMatrix4fv(skyboxUniforms.projectionMatrix, false, projectionMatrix);
-        gl.uniformMatrix4fv(skyboxUniforms.viewMatrix, false, viewMatrix);
-        gl.activeTexture(gl.TEXTURE1);                                                      // Texture 1 is skybox texture
-        gl.bindTexture(gl.TEXTURE_CUBE_MAP, skyboxTexture);
-        gl.uniform1i(skyboxUniforms.skybox, 1);
-        gl.bindBuffer(gl.ARRAY_BUFFER, skyboxBuffer);
-        gl.enableVertexAttribArray(skyboxAttribs.position);
-        gl.vertexAttribPointer(skyboxAttribs.position, 3, gl.FLOAT, false, 0, 0);        
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, skyboxIndexBuffer);
-        gl.drawElements(gl.TRIANGLES, skyboxIndices.length, gl.UNSIGNED_SHORT, 0);
-        gl.depthFunc(gl.LESS);
-    }
-    
-    // Draw water texture
-    gl.useProgram(renderProgram);
-
-    // Send matrices
-    gl.uniformMatrix4fv(renderUniforms.modelMatrix, false, modelMatrix);
-    gl.uniformMatrix4fv(renderUniforms.vp, false, vpMatrix);
-    gl.uniform3fv(renderUniforms.cameraPos, cameraPosition);
-    gl.uniform2f(renderUniforms.pixelSize, 1 / simResolution, 1 / simResolution);
-    gl.uniform1i(renderUniforms.heightMap, 0);
-    gl.uniform1i(renderUniforms.skybox, 1);
-    
-    // Add the teapots
-    for (let i = 0; i < MAX_LIGHTS; i++) {
-        const src = teapotSources[i];
-        if (src && src.isOn) {
-            gl.uniform3fv(renderUniforms.lightPositions[i], src.position);
-            gl.uniform3fv(renderUniforms.lightColors[i],  src.color);
-        } else if (src) {
-            gl.uniform3fv(renderUniforms.lightPositions[i], src.position);
-            gl.uniform3fv(renderUniforms.lightColors[i],  vec3.fromValues(0.0, 0.0, 0.0));
-        } else {
-            // Empty slots
-            gl.uniform3fv(renderUniforms.lightPositions[i], vec3.fromValues(0.0, -9999.0, 0.0));
-            gl.uniform3fv(renderUniforms.lightColors[i],    vec3.fromValues(0.0, 0.0, 0.0));
-        }
-    }
-    // Add textures
-    gl.uniform1f(renderUniforms.poolDimension, poolDimension);
-
-    // Connect texture to checkbox
-    gl.uniform1i(renderUniforms.showReflections, reflectionCheckbox.checked);
-    // Connect cubemap to texture unit 1
-    if (skyboxTexture) {
-        gl.activeTexture(gl.TEXTURE1);
-        gl.bindTexture(gl.TEXTURE_CUBE_MAP, skyboxTexture);
-    }
-
-    // Buffers
-    gl.enableVertexAttribArray(renderAttribs.position);
-    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-    gl.vertexAttribPointer(renderAttribs.position, 3, gl.FLOAT, false, 0, 0);
-
-    gl.enableVertexAttribArray(renderAttribs.uv);
-    gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
-    gl.vertexAttribPointer(renderAttribs.uv, 2, gl.FLOAT, false, 0, 0);
-
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-    gl.drawElements(gl.TRIANGLES, floorGeometry.indices.length, gl.UNSIGNED_SHORT, 0);
-
-    // Draw the torches
-    if (torchGeometry) {
-        gl.useProgram(torchProgram);
-
-        gl.bindBuffer(gl.ARRAY_BUFFER, torchPositionBuffer);
-        gl.enableVertexAttribArray(torchAttribs.position);
-        gl.vertexAttribPointer(torchAttribs.position, 3, gl.FLOAT, false, 0, 0);
-
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, torchIndexBuffer);
-        gl.uniformMatrix4fv(torchUniforms.vp, false, vpMatrix);
-
-        teapotSources.forEach(src => {
-            const modelMatrix = mat4.create();
-            mat4.translate(modelMatrix, modelMatrix, src.position);
-            mat4.scale(modelMatrix, modelMatrix, [TEAPOT_SCALE, TEAPOT_SCALE, TEAPOT_SCALE]); // scala modello
-            gl.uniformMatrix4fv(torchUniforms.modelMatrix, false, modelMatrix);
-
-            // colore acceso/spento
-            const off = vec3.fromValues(0.25, 0.25, 0.25);
-            gl.uniform3fv(torchUniforms.color, src.isOn ? src.color : off);
-
-            gl.drawElements(gl.TRIANGLES, torchGeometry.indices.length, gl.UNSIGNED_SHORT, 0);
-        });
-    }
-
-    requestAnimationFrame(render);
 }
 
-// Start the rendering loop
-requestAnimationFrame(render);
 
 // To create the floor
 function createFloorGeometry(width, height, segX, segY){
@@ -750,30 +905,6 @@ function createFBO(gl, width, height, format, type){
 const floatTexturesExt = gl.getExtension('OES_texture_float');
 if (!floatTexturesExt) {
     throw new Error('[Float Texture] Something went wrong: browser does not support textures');
-}
-
-
-function updateCamera(currentTime){
-    const deltaTime = (currentTime - lastTime)/1000;    // Time in seconds
-    lastTime = currentTime;
-    const speed = 5.0 * deltaTime;  
-    // Determines movement based on yaw
-    const forward = vec3.fromValues(Math.sin(cameraYaw), 0, Math.cos(cameraYaw));
-    const right = vec3.fromValues(forward[2], 0, -forward[0]);
-
-    // Move by pressing keybord
-    if (keysPressed['KeyW']) {
-        vec3.scaleAndAdd(cameraPosition, cameraPosition, forward, speed);
-    }
-    if (keysPressed['KeyA']) {
-        vec3.scaleAndAdd(cameraPosition, cameraPosition, right, speed);
-    }
-    if (keysPressed['KeyS']) {
-        vec3.scaleAndAdd(cameraPosition, cameraPosition, forward, -speed);
-    }
-    if (keysPressed['KeyD']) {
-        vec3.scaleAndAdd(cameraPosition, cameraPosition, right, -speed);
-    }
 }
 
 function makeRayFromScreen(clientX, clientY, projectionMatrix, viewMatrix) {
@@ -999,4 +1130,32 @@ async function setupTorchModel(url) {
     }
 }
 
-setupTorchModel('teapot.obj');
+async function setupBallModel(url) {
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`[OBJ Loader] Failed to load model: ${response.statusText}`);
+        }
+        const text = await response.text();
+        physicsBall = new PhysicsBall(gl);
+        physicsBall.setMesh(text);
+        ballProgram = createProgram(gl, createShader(gl, gl.VERTEX_SHADER, ballVS), createShader(gl, gl.FRAGMENT_SHADER, ballFS));
+        ballAttribs = {
+            position: gl.getAttribLocation(ballProgram, 'a_position'),
+            normal: gl.getAttribLocation(ballProgram, 'a_normal'),
+        };
+        ballUniforms = {
+            mvp: gl.getUniformLocation(ballProgram, 'u_mvp'),
+            normalMatrix: gl.getUniformLocation(ballProgram, 'u_normalMatrix'),
+            lightDir: gl.getUniformLocation(ballProgram, 'u_lightDir'),
+        }
+    } catch (error) {
+        console.error(error);
+    }
+}
+
+//Start application
+main().catch(error => {
+    console.error("Errore durante l'inizializzazione dell'applicazione:", error);
+    alert("Si è verificato un errore critico. Controlla la console per i dettagli.");
+});
