@@ -13,13 +13,6 @@ let skyboxProgram, skyboxAttribs, skyboxUniforms;
 let positionBuffer, uvBuffer, floorIndexBuffer, quadBuffer, skyboxBuffer, skyboxIndexBuffer;
 let skyboxIndices, skyboxVertices;
 let floorGeometry,quadPositions;
-// To add checkbox and slider
-const reflectionCheckbox = document.getElementById('reflection-checkbox');
-const dampingSlider = document.getElementById('damping-slider');
-const dampingValueSpan = document.getElementById('damping-value');
-const forceSlider = document.getElementById('force-slider');
-const forceValueSpan = document.getElementById('force-value');
-
 // Canvas and GL initialization
 const canvas = document.getElementById('webgl-canvas');
 const gl = canvas.getContext('webgl');
@@ -524,7 +517,7 @@ function drawScene(){
     gl.uniform2f(renderUniforms.pixelSize, 1 / simResolution, 1 / simResolution);
     gl.uniform1f(renderUniforms.poolDimension, poolDimension);
     // Connect texture to checkbox
-    gl.uniform1i(renderUniforms.showReflections, reflectionCheckbox.checked);
+    gl.uniform1i(renderUniforms.showReflections,  document.getElementById('reflection-checkbox').checked);
     
     // Add the teapots
     for (let i = 0; i < MAX_LIGHTS; i++) {
@@ -716,125 +709,164 @@ function resizeCanvas(){
 
 
 function setupEventListeners(){
+    // Sliders and checboxes
+    // Water damping slider
+    document.getElementById('damping-slider').addEventListener('input', (e) =>{
+        damping = e.target.value/ 1000.0;
+        document.getElementById('damping-value').textContent = damping.toFixed(3);
+    });
+    // Mouse force slider
+    document.getElementById('force-slider').addEventListener('input', (e) =>{
+        force = e.target.value/ 100.0;
+        document.getElementById('force-value').textContent = force.toFixed(2);
+    });
+    // Turn all teapots/torches on/off
+    document.getElementById('teapots-checkbox').addEventListener('change', function () {
+        const turnOn = this.checked;
+        teapotSources.forEach(src => {
+            if (src) {
+                src.isOn = turnOn;
+            }
+        });
+    });
+    // Gravity
+    document.getElementById('gravity-slider').addEventListener('input', function () {
+        const val = parseFloat(this.value);
+        physicsBall.gravity[1] = val; // Solo Y
+        document.getElementById('gravity-value').textContent = val.toFixed(2);
+    });
+    // Mass
+    document.getElementById('mass-slider').addEventListener('input', function () {
+        const val = parseFloat(this.value);
+        physicsBall.mass = val;
+        document.getElementById('mass-value').textContent = val.toFixed(2);
+    });
+    // Stiffness
+    document.getElementById('stiffness-slider').addEventListener('input', function () {
+        const val = parseFloat(this.value);
+        physicsBall.stiffness = val;
+        document.getElementById('stiffness-value').textContent = val.toFixed(1);
+    });
+    // Ball damping
+    document.getElementById('ball-damping-slider').addEventListener('input', function () {
+        const val = parseFloat(this.value);
+        physicsBall.damping = val;
+        document.getElementById('ball-damping-value').textContent = val.toFixed(2);
+    });
+     // Restitution
+    document.getElementById('restitution-slider').addEventListener('input', function () {
+        const val = parseFloat(this.value);
+        physicsBall.restitution = val;
+        document.getElementById('restitution-value').textContent = val.toFixed(2);
+    });
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
 
-// Event listener for sliders
-dampingSlider.addEventListener('input', (e) =>{
-    damping = e.target.value/ 1000.0;
-    dampingValueSpan.textContent = damping.toFixed(3);
-});
-forceSlider.addEventListener('input', (e) =>{
-    force = e.target.value/ 100.0;
-    forceValueSpan.textContent = force.toFixed(2);
-});
-window.addEventListener('resize', resizeCanvas);
-resizeCanvas();
-
-canvas.addEventListener('mousedown', (e) =>{
-    isMouseDown = true;
-    // Some mapping  is necessary since there is a discrpancy in the center
-    const rect = canvas.getBoundingClientRect();
-    const normalizedX = (e.clientX - rect.left) / rect.width;
-    const normalizedY = (e.clientY - rect.top) / rect.height;
-
-    // To pick at the object
-    const mouseX_clip = normalizedX * 2 - 1;
-    const mouseY_clip = (1.0 - normalizedY) * 2 - 1;
-        
-    // To deal with ball physics
-    if (physicsBall) {
-        physicsBall.findClosestVertex([mouseX_clip, mouseY_clip], vpMatrix);
-        if (physicsBall.startDrag([mouseX_clip, mouseY_clip], vpMatrix)) {
-            isDraggingBall = true;
-            return;
-        }
-    }
-    // To turn on/off the lights
-    const { origin, dir } = makeRayFromScreen(
-        e.clientX, e.clientY, 
-        lastProjectionMatrix, lastViewMatrix
-    );   
-    const hitRadius = torchModelRadius * TEAPOT_SCALE * 2.0;
-    let hitIndex = -1, bestT = Number.POSITIVE_INFINITY;
-
-    for (let i = 0; i < teapotSources.length; i++) {
-        const t = raySphere(origin, dir, teapotSources[i].position, hitRadius);
-        if (t !== null && t < bestT) {
-            bestT = t;
-            hitIndex = i;
-        }
-    }
-
-    if (hitIndex >= 0) {
-        teapotSources[hitIndex].isOn = !teapotSources[hitIndex].isOn;
-        return; // return: do not generate a wave
-    }
-
-    // Generate a wave
-    mousePos = [1.0 - normalizedX, 1.0 - normalizedY];
-    mouseForce = force;   // Generate waves when clicking - value from slider     
-    
-});
-canvas.addEventListener('mouseup', () =>{
-    isMouseDown = false;
-    mouseForce = 0;
-    mousePos = [-1, -1];
-    if (isDraggingBall && physicsBall) {
-       physicsBall.endDrag();
-       isDraggingBall = false;
-    }
-});
-// Stop rotation if the mouse leaves the frame
-canvas.addEventListener('mouseleave', () => {
-    isMouseDown = false;
-    if (isDraggingBall && physicsBall) {
-       physicsBall.endDrag();
-       isDraggingBall = false;
-    }
-});
-
-document.addEventListener('mousemove', (e) => {
-    // Ball
-    if (isDraggingBall && physicsBall) {
-        const rect = canvas.getBoundingClientRect();
-        const mouseX_clip = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        const mouseY_clip = (((e.clientY - rect.top) / rect.height) * -2 + 1);
-        physicsBall.updateDrag([mouseX_clip, mouseY_clip]);
-        return;
-    }
-    // Camera rotation
-    if (document.pointerLockElement === canvas) {
-        cameraYaw -= e.movementX * 0.002;
-        cameraPitch -= e.movementY * 0.002;
-        // To avoid problem with the camera, this limits the velocity 
-        const maxPitch = Math.PI / 2 - 0.1;
-        cameraPitch = Math.max(-maxPitch, Math.min(maxPitch, cameraPitch));
-    }
-    if (isMouseDown && !isDraggingBall) {
+    canvas.addEventListener('mousedown', (e) =>{
+        isMouseDown = true;
+        // Some mapping  is necessary since there is a discrpancy in the center
         const rect = canvas.getBoundingClientRect();
         const normalizedX = (e.clientX - rect.left) / rect.width;
-        const normalizedY = (e.clientY - rect.top)  / rect.height;
-        mousePos = [1.0 - normalizedX, 1.0- normalizedY];
-    }
-});
-canvas.addEventListener('wheel', (e) => {
-    // e.deltaY positive when zooming out
-    // e.deltaY negative when zooming in
-    fov_degrees += e.deltaY * 0.05; 
-    // Limits to avoid excessive zooming in and out (it will flip the scene upside down)
-    fov_degrees = Math.max(15, Math.min(90, fov_degrees));
-});
-// Event listeners to move in the space
-window.addEventListener('keydown', (e) =>{
-    keysPressed[e.code] = true;
-    if(keysPressed['KeyR']) {
-        canvas.requestPointerLock();      // This hides the pointer, for now it is more confusing than anything...
-    };
-});
-window.addEventListener('keyup', (e) =>{
-    keysPressed[e.code] = false;
-});
-}
+        const normalizedY = (e.clientY - rect.top) / rect.height;
 
+        // To pick at the object
+        const mouseX_clip = normalizedX * 2 - 1;
+        const mouseY_clip = (1.0 - normalizedY) * 2 - 1;
+            
+        // To deal with ball physics
+        if (physicsBall) {
+            physicsBall.findClosestVertex([mouseX_clip, mouseY_clip], vpMatrix);
+            if (physicsBall.startDrag([mouseX_clip, mouseY_clip], vpMatrix)) {
+                isDraggingBall = true;
+                return;
+            }
+        }
+        // To turn on/off the lights
+        const { origin, dir } = makeRayFromScreen(
+            e.clientX, e.clientY, 
+            lastProjectionMatrix, lastViewMatrix
+        );   
+        const hitRadius = torchModelRadius * TEAPOT_SCALE * 2.0;
+        let hitIndex = -1, bestT = Number.POSITIVE_INFINITY;
+
+        for (let i = 0; i < teapotSources.length; i++) {
+            const t = raySphere(origin, dir, teapotSources[i].position, hitRadius);
+            if (t !== null && t < bestT) {
+                bestT = t;
+                hitIndex = i;
+            }
+        }
+
+        if (hitIndex >= 0) {
+            teapotSources[hitIndex].isOn = !teapotSources[hitIndex].isOn;
+            return; // return: do not generate a wave
+        }
+
+        // Generate a wave
+        mousePos = [1.0 - normalizedX, 1.0 - normalizedY];
+        mouseForce = force;   // Generate waves when clicking - value from slider     
+        
+    });
+    canvas.addEventListener('mouseup', () =>{
+        isMouseDown = false;
+        mouseForce = 0;
+        mousePos = [-1, -1];
+        if (isDraggingBall && physicsBall) {
+        physicsBall.endDrag();
+        isDraggingBall = false;
+        }
+    });
+    // Stop rotation if the mouse leaves the frame
+    canvas.addEventListener('mouseleave', () => {
+        isMouseDown = false;
+        if (isDraggingBall && physicsBall) {
+        physicsBall.endDrag();
+        isDraggingBall = false;
+        }
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        // Ball
+        if (isDraggingBall && physicsBall) {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX_clip = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            const mouseY_clip = (((e.clientY - rect.top) / rect.height) * -2 + 1);
+            physicsBall.updateDrag([mouseX_clip, mouseY_clip]);
+            return;
+        }
+        // Camera rotation
+        if (document.pointerLockElement === canvas) {
+            cameraYaw -= e.movementX * 0.002;
+            cameraPitch -= e.movementY * 0.002;
+            // To avoid problem with the camera, this limits the velocity 
+            const maxPitch = Math.PI / 2 - 0.1;
+            cameraPitch = Math.max(-maxPitch, Math.min(maxPitch, cameraPitch));
+        }
+        if (isMouseDown && !isDraggingBall) {
+            const rect = canvas.getBoundingClientRect();
+            const normalizedX = (e.clientX - rect.left) / rect.width;
+            const normalizedY = (e.clientY - rect.top)  / rect.height;
+            mousePos = [1.0 - normalizedX, 1.0- normalizedY];
+        }
+    });
+    canvas.addEventListener('wheel', (e) => {
+        // e.deltaY positive when zooming out
+        // e.deltaY negative when zooming in
+        fov_degrees += e.deltaY * 0.05; 
+        // Limits to avoid excessive zooming in and out (it will flip the scene upside down)
+        fov_degrees = Math.max(15, Math.min(90, fov_degrees));
+    });
+    // Event listeners to move in the space
+    window.addEventListener('keydown', (e) =>{
+        keysPressed[e.code] = true;
+        if(keysPressed['KeyR']) {
+            canvas.requestPointerLock();      // This hides the pointer, for now it is more confusing than anything...
+        };
+    });
+    window.addEventListener('keyup', (e) =>{
+        keysPressed[e.code] = false;
+    });
+}
 
 // To create the floor
 function createFloorGeometry(width, height, segX, segY){

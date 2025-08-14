@@ -24,13 +24,13 @@ class PhysicsBall {
         const box = this.mesh.getBoundingBox();
         // Determine position and scale of the ball
         const shift = [
-            -(box.min[0] + box.max[0]),
-           10, // Posiziona la palla sopra l'acqua
-            -(box.min[2] + box.max[2])
+            -(box.min[0] + box.max[0])/2,
+            0, // Ball position on top of water
+            -(box.min[2] + box.max[2])/2,
         ];
         const size = [box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]];
         const maxSize = Math.max(size[0], size[1], size[2]);
-        const scale = 1.0 / maxSize;
+        const scale = maxSize; //1.0 / maxSize;
         
         // Shift and scale vertices
         this.mesh.shiftAndScale(shift, scale);
