@@ -93,10 +93,12 @@ The project will now proceed to the next planned features:
 3.  The project will open in your default browser.
 
 ### Controls
-- **Rotate Camera**: R and move mouse
-- **Move**: W/A/S/D
-- **Zoom FOV**: Mouse wheel
-- **Ripple Water**: Click or drag on water
+- **Rotate camera**: R and move mouse.
+- **Move**: W/A/S/D.
+- **Zoom FOV**: mouse wheel.
+- **Generate waves**: click on water.
+- **Turn torches on/off**: click on torches/teapots.
+- **Drag/toss ball**: click and drag ball.
 
 # References
 [Source 1] https://www.w3schools.com/colors/colors_converter.asp (colour converter, from hex to rgb)
