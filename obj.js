@@ -1,6 +1,4 @@
-// Copyright 2020, Cem Yuksel, University of Utah
-
-class ObjMesh
+class Objects
 {
 	constructor()
 	{
@@ -12,19 +10,54 @@ class ObjMesh
 		this.nfac = [];	// face surface normal indices
 	}
 	
-	// Reads the obj file at the given URL and parses it.
-	load( url )
-	{
-		var xhttp = new XMLHttpRequest();
-		xhttp.onreadystatechange = function() {
-			if (this.readyState == 4 && this.status == 200) {
-				parse( this.responseText );
-			}
-		};
-		xhttp.open("GET", url, true);
-		xhttp.send();
-	}
+	// To upload an object in the scene
+	getIndexBuffers() {
+	    const finalPositions = [];
+        const finalTexcoords = [];
+        const finalNormals = [];
+        const finalIndices = [];
+        const vertexCache = new Map();
+
+        for (let i = 0; i < this.face.length; i++) {
+            const face = this.face[i];
+            const tface = this.tfac[i] || [];
+            const nface = this.nfac[i] || [];
+            const faceIndices = [];
+
+            for (let j = 0; j < face.length; j++) {
+                const posIndex = face[j];
+                const texIndex = tface[j];
+                const normIndex = nface[j];
+                const vertexString = `${posIndex}/${texIndex}/${normIndex}`;
+                
+                if (vertexCache.has(vertexString)) {
+                    faceIndices.push(vertexCache.get(vertexString));
+                    continue;
+                }
+
+                const newIndex = finalPositions.length / 3;
+                
+                finalPositions.push(...this.vpos[posIndex]);
+                if (texIndex !== undefined) finalTexcoords.push(...this.tpos[texIndex]);
+                if (normIndex !== undefined) finalNormals.push(...this.norm[normIndex]);
+                
+                faceIndices.push(newIndex);
+                vertexCache.set(vertexString, newIndex);
+            }
+
+            for (let k = 1; k < faceIndices.length - 1; ++k) {
+                finalIndices.push(faceIndices[0], faceIndices[k], faceIndices[k + 1]);
+            }
+        }
 	
+	     return {
+            positions: finalPositions.length > 0 ? new Float32Array(finalPositions) : null,
+            texcoords: finalTexcoords.length > 0 ? new Float32Array(finalTexcoords) : null,
+            normals: finalNormals.length > 0 ? new Float32Array(finalNormals) : null,
+            indices: finalIndices.length > 0 ? new Uint32Array(finalIndices) : null,
+        };
+	}
+
 	// Parses the contents of an obj file.
 	parse( objdata )
 	{
@@ -75,7 +108,7 @@ class ObjMesh
 			}
 		}
 	}
-	
+
 	// Returns the bounding box of the object
 	getBoundingBox()
 	{
@@ -196,54 +229,5 @@ class ObjMesh
 		}
 		
 		return { positionBuffer: vBuffer, texCoordBuffer: tBuffer, normalBuffer: nBuffer };
-	}
-
-	getElementBuffers()
-	{
-		function setBuffer( buffer, i, data, dim )
-		{
-			for ( var d=0, k=i*dim; d<dim; ++d, ++k ) buffer[k] = data[d];
-		}
-		
-		var vBuffer = [];
-		var tBuffer = [];
-		var nBuffer = [];
-		var eBuffer = [];
-
-		vBuffer.length = this.vpos.length * 3;
-		for ( var i=0; i<this.vpos.length; ++i ) {
-			setBuffer( vBuffer, i, this.vpos[i], 3 );
-		}
-		tBuffer.length = this.vpos.length * 2;
-		nBuffer.length = this.vpos.length * 3;
-		tBuffer.fill(0);
-		nBuffer.fill(0);
-
-		function addTriangleToBuffers( mesh, fi, i, j, k )
-		{
-			addVertexToBuffers( mesh, fi, i );
-			addVertexToBuffers( mesh, fi, j );
-			addVertexToBuffers( mesh, fi, k );
-		}
-		
-		function addVertexToBuffers( mesh, fi, i )
-		{
-			var f  = mesh.face[fi];
-			var tf = mesh.tfac[fi];
-			var nf = mesh.nfac[fi];
-			eBuffer.push( f[i] );
-			setBuffer( tBuffer, f[i], mesh.tpos[ tf[i] ], 2 );
-			setBuffer( nBuffer, f[i], mesh.norm[ nf[i] ], 3 );
-		}
-
-		for ( var i=0; i<this.face.length; ++i ) {
-			if ( this.face[i].length < 3 ) continue;
-			addTriangleToBuffers( this, i, 0, 1, 2 );
-			for ( var j=3; j<this.face[i].length; ++j ) {
-				addTriangleToBuffers( this, i, 0, j-1, j );
-			}
-		}
-
-		return { elementBuffer: eBuffer, positionBuffer: vBuffer, texCoordBuffer: tBuffer, normalBuffer: nBuffer };
 	}
 }

@@ -13,9 +13,18 @@ let skyboxProgram, skyboxAttribs, skyboxUniforms;
 let positionBuffer, uvBuffer, floorIndexBuffer, quadBuffer, skyboxBuffer, skyboxIndexBuffer;
 let skyboxIndices, skyboxVertices;
 let floorGeometry,quadPositions;
+let shadowProgram, shadowAttribs, shadowUniforms;
+let shadowMapFBO, shadowMapTexture;
+const SHADOW_MAP_SIZE = 1024; 
+let lightSpaceMatrix = mat4.create(); 
+const shadowLightDir = vec3.fromValues(0.5, -0.8, 0.5);     // Sun direction
+vec3.normalize(shadowLightDir, shadowLightDir);
 // Canvas and GL initialization
 const canvas = document.getElementById('webgl-canvas');
 const gl = canvas.getContext('webgl');
+// Audio
+const waveSound = document.getElementById('wave-sound');
+const dropSound = document.getElementById('drop-sound');
 
 if (!gl) {
 	throw new Error("[INIT] Unable to initialize WebGL. Your browser or machine may not support it.");
@@ -70,12 +79,16 @@ const renderVS = `
     uniform mat4 u_modelMatrix;         // Matrix model
     uniform mat4 u_vp;                  // Combined view and projection matrix
     varying vec3 v_worldPosition;
+    uniform mat4 u_lightSpaceMatrix;    // VP matrix for light
+    varying vec4 v_lightSpacePos;       // Vertex position for light
 
     void main(){
         v_uv = a_uv;
         float height = texture2D(u_heightMap, v_uv).r; 
         vec3 displacedPosition = a_position + vec3(0.0, height * 0.5, 0.0);
         gl_Position = u_vp  * u_modelMatrix * vec4(displacedPosition, 1.0);
+        // Calculate the position from the light poinf of view  
+        v_lightSpacePos = u_lightSpaceMatrix * u_modelMatrix * vec4(displacedPosition, 1.0);
         // Determine position in world frame
         v_worldPosition = (u_modelMatrix * vec4(displacedPosition, 1.0)).xyz;
     }
@@ -94,7 +107,25 @@ const renderFS = `
     // Add different lights for the 4 torches
     uniform vec3 u_lightPositions[${MAX_LIGHTS}];
     uniform vec3 u_lightColors[${MAX_LIGHTS}];
-
+    // To have shadows
+    uniform sampler2D u_shadowMap;      
+    varying vec4 v_lightSpacePos;       
+    uniform vec3 u_shadowLightDir;
+    
+    // Function to calculate shadows
+    float calculateShadow() {
+        vec3 projCoords = v_lightSpacePos.xyz / v_lightSpacePos.w;
+        vec2 shadowMapUv = projCoords.xy * 0.5 + 0.5;
+        float closestDepth = texture2D(u_shadowMap, shadowMapUv).r;
+        float currentDepth = projCoords.z;
+        float bias = 0.005;
+        float shadow = currentDepth - bias > closestDepth ? 0.5 : 1.0;
+        if (shadowMapUv.x > 1.0 || shadowMapUv.x < 0.0 || shadowMapUv.y > 1.0 || shadowMapUv.y < 0.0) {
+            shadow = 1.0;
+        }
+        return shadow;
+    }
+        
     void main(){
         // Water color rgb(143, 240, 220) - [Source 1]
         float r = 143.0/255.0;
@@ -111,6 +142,8 @@ const renderFS = `
         vec3 normal = normalize(vec3(hL - hR, 2.0 * worldTexelSize, hD - hU));
         // Blinn-Phong illumination
         vec3 viewDir = normalize(u_cameraPos - v_worldPosition);
+        // Shadow
+        float shadow = calculateShadow();
 
         // Model for more lights
         vec3 totalDiffuse = vec3(0.0);
@@ -126,8 +159,10 @@ const renderFS = `
             float spec = pow(max(dot(normal, halfwayDir), 0.0), 64.0);  // 64 = maxShiniess
             totalSpecular += lightColor*spec;      
         }
+        // Add light to simulate sun
+        float shadowLightDiffuse = max(dot(normal, u_shadowLightDir), 0.0);
 
-        vec3 lightingColor = baseColor * 0.2 + baseColor * totalDiffuse;
+        vec3 lightingColor = baseColor * 0.2 + (baseColor * totalDiffuse + shadowLightDiffuse * 0.5) * shadow;
         vec3 finalColor = lightingColor;
 
         if(u_showReflections){
@@ -141,7 +176,7 @@ const renderFS = `
             finalColor = mix(lightingColor, reflectionColor.rgb, fresnel);
         }
         
-        finalColor += totalSpecular;
+        finalColor += totalSpecular * shadow;
         gl_FragColor = vec4(finalColor, 1.0); 
     }
 `;
@@ -271,6 +306,22 @@ const ballFS = `
     }
 `;
 
+const shadowVS = `
+    attribute vec3 a_position;
+    uniform mat4 u_lightSpaceMatrix;
+   
+    void main() {
+        gl_Position = u_lightSpaceMatrix * vec4(a_position, 1.0);
+    }
+`;
+
+const shadowFS = `
+    precision mediump float;
+    void main() {
+        gl_FragColor = vec4(1.0);
+    }
+`;
+
 // Main
 async function main(){
     gl.enable(gl.DEPTH_TEST);
@@ -279,6 +330,11 @@ async function main(){
     const floatTextureExt = gl.getExtension('OES_texture_float');
     if(!floatTextureExt){
         throw new Error("[INIT] Unable to add float texture. Your browser or machine may not support it.");
+    }
+    // Extension for depth texture
+    const depthTextureExt = gl.getExtension('WEBGL_depth_texture');
+    if (!depthTextureExt) {
+        throw new Error("[INIT] Unable to use depth texture. Your browser or machine may not support it.");
     }
     // Floor geometry
     floorGeometry = createFloorGeometry(poolDimension, poolDimension, floorSegments, floorSegments);
@@ -356,6 +412,9 @@ async function main(){
         showReflections: gl.getUniformLocation(renderProgram, 'u_showReflections'),
         skybox: gl.getUniformLocation(renderProgram, 'u_skybox'),
         poolDimension: gl.getUniformLocation(renderProgram, 'u_poolDimension'),
+        lightSpaceMatrix: gl.getUniformLocation(renderProgram, 'u_lightSpaceMatrix'),
+        shadowMap: gl.getUniformLocation(renderProgram, 'u_shadowMap'),
+        shadowLightDir: gl.getUniformLocation(renderProgram, 'u_shadowLightDir'),
     };
     // Add uniform
     for(let i = 0; i < MAX_LIGHTS; i++){
@@ -389,6 +448,18 @@ async function main(){
         viewMatrix: gl.getUniformLocation(skyboxProgram, 'u_viewMatrix'),
         skybox: gl.getUniformLocation(skyboxProgram, 'u_skybox'),
     };
+    shadowProgram = createProgram(gl,
+        createShader(gl, gl.VERTEX_SHADER, shadowVS),
+        createShader(gl, gl.FRAGMENT_SHADER, shadowFS)
+    );
+    shadowAttribs = {
+        position: gl.getAttribLocation(shadowProgram, 'a_position'),
+    };
+    shadowUniforms = {
+        lightSpaceMatrix: gl.getUniformLocation(shadowProgram, 'u_lightSpaceMatrix'),
+    };
+    
+    setupShadowMapFBO();
 
     // FBO setup for simulation
     stateA = createFBO(gl, simResolution, simResolution, gl.RGBA, gl.FLOAT);
@@ -421,6 +492,9 @@ function render(currentTime) {
 
     // Simulation step
     runSimulationStep();
+
+    // Draw shadows
+    renderShadowMap();
 
     // Draw
     drawScene();
@@ -510,12 +584,19 @@ function drawScene(){
         gl.bindTexture(gl.TEXTURE_CUBE_MAP, skyboxTexture);
         gl.uniform1i(renderUniforms.skybox, 1);
     }
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, shadowMapTexture);
+    gl.uniform1i(renderUniforms.shadowMap, 2);
+
     // Send matrices
     gl.uniformMatrix4fv(renderUniforms.modelMatrix, false, modelMatrix);
     gl.uniformMatrix4fv(renderUniforms.vp, false, vpMatrix);
     gl.uniform3fv(renderUniforms.cameraPos, cameraPosition);
     gl.uniform2f(renderUniforms.pixelSize, 1 / simResolution, 1 / simResolution);
     gl.uniform1f(renderUniforms.poolDimension, poolDimension);
+    gl.uniformMatrix4fv(renderUniforms.lightSpaceMatrix, false, lightSpaceMatrix);
+    gl.uniform3fv(renderUniforms.shadowLightDir, shadowLightDir);
+
     // Connect texture to checkbox
     gl.uniform1i(renderUniforms.showReflections,  document.getElementById('reflection-checkbox').checked);
     
@@ -629,6 +710,7 @@ function onBallCollision(position, velocity) {
         mousePos = [waterUV_x, waterUV_y];
         mouseForce = impactForce;
     }
+    //playSoundEffect('drop');
 }
 
 // Helper functions
@@ -806,6 +888,8 @@ function setupEventListeners(){
         mousePos = [1.0 - normalizedX, 1.0 - normalizedY];
         mouseForce = force;   // Generate waves when clicking - value from slider     
         
+        // Add sound when generating a wave
+        playSoundEffect('wave');
     });
     canvas.addEventListener('mouseup', () =>{
         isMouseDown = false;
@@ -992,98 +1076,6 @@ const teapotSources = [
     { position: vec3.fromValues(-(poolDimension/2)+4,   2.0,    0.0),                   color: vec3.fromValues(0.9, 1.0, 0.5), isOn: true },  // rgba(224, 255, 141, 1) - [Source 1]
 ];
 
-// To upload an object in the scene
-function loadObj(text) {
-    // Temporary array to save object coordinates
-    const objPositions = [];
-    const objTexcoords = []; 
-    const objNormals = [];
-
-    // Unraveled array
-    const finalPositions = [];
-    const finalTexcoords = [];
-    const finalNormals = [];
-    const finalIndices = [];
-
-    // Cache per ottimizzare ed evitare vertici duplicati.
-    // La chiave è la stringa "v/vt/vn", il valore è l'indice finale.
-    const vertexCache = new Map();
-
-    const lines = text.split('\n');
-    for (const line of lines) {
-        const trimmedLine = line.trim();
-        if (trimmedLine.length === 0 || trimmedLine.startsWith('#')) {
-            continue; // Salta righe vuote e commenti
-        }
-
-        const parts = trimmedLine.split(/\s+/);
-        const keyword = parts[0];
-
-        if (keyword === 'v') {
-            objPositions.push(parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]));
-        } else if (keyword === 'vt') {
-            // Gestisce coordinate texture 2D (la maggior parte dei casi)
-            objTexcoords.push(parseFloat(parts[1]), parseFloat(parts[2]));
-        } else if (keyword === 'vn') {
-            objNormals.push(parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]));
-        } else if (keyword === 'f') {
-            const faceVertexData = parts.slice(1); // Es. ["1/1/1", "2/2/1", "18/18/1", "17/17/1"]
-            const faceIndices = [];
-
-            for (const vertexString of faceVertexData) {
-                // Se abbiamo già processato questa combinazione v/vt/vn, riutilizzala
-                if (vertexCache.has(vertexString)) {
-                    faceIndices.push(vertexCache.get(vertexString));
-                    continue;
-                }
-
-                // È un vertice nuovo, va srotolato
-                const vertexParts = vertexString.split('/');
-                const posIndex = parseInt(vertexParts[0]) - 1;
-                const texIndex = vertexParts.length > 1 && vertexParts[1] ? parseInt(vertexParts[1]) - 1 : -1;
-                const normIndex = vertexParts.length > 2 && vertexParts[2] ? parseInt(vertexParts[2]) - 1 : -1;
-                
-                // Il nuovo indice sarà la posizione attuale nell'array finale
-                const newIndex = finalPositions.length / 3;
-                
-                // Aggiungi i dati agli array finali
-                // Posizioni (3 componenti: x, y, z)
-                finalPositions.push(objPositions[posIndex * 3], objPositions[posIndex * 3 + 1], objPositions[posIndex * 3 + 2]);
-                
-                // Coordinate Texture (2 componenti: u, v) - se esistono
-                if (texIndex !== -1) {
-                    finalTexcoords.push(objTexcoords[texIndex * 2], objTexcoords[texIndex * 2 + 1]);
-                }
-
-                // Normali (3 componenti: nx, ny, nz) - se esistono
-                if (normIndex !== -1) {
-                    finalNormals.push(objNormals[normIndex * 3], objNormals[normIndex * 3 + 1], objNormals[normIndex * 3 + 2]);
-                }
-                
-                faceIndices.push(newIndex);
-                vertexCache.set(vertexString, newIndex);
-            }
-
-            // Triangolazione della faccia (gestisce triangoli, quadrilateri e n-goni)
-            for (let i = 1; i < faceIndices.length - 1; ++i) {
-                finalIndices.push(
-                    faceIndices[0], 
-                    faceIndices[i], 
-                    faceIndices[i + 1]
-                );
-            }
-        }
-    }
-    
-    // Controlla che i buffer non siano vuoti prima di crearli
-    return {
-        positions: finalPositions.length > 0 ? new Float32Array(finalPositions) : null,
-        texcoords: finalTexcoords.length > 0 ? new Float32Array(finalTexcoords) : null,
-        normals: finalNormals.length > 0 ? new Float32Array(finalNormals) : null,
-        indices: finalIndices.length > 0 ? new Uint32Array(finalIndices) : null,
-    };
-}
-
 // Function to create and place the toarches
 async function setupTorchModel(url) {
     try {
@@ -1092,10 +1084,15 @@ async function setupTorchModel(url) {
             throw new Error(`[OBJ Loader] Failed to load model: ${response.statusText}`);
         }
         const text = await response.text();
-        torchGeometry = loadObj(text);
-        console.log("Teapot has geometry:", torchGeometry);
+        torchMeshes = new Objects();
+        torchMeshes.parse(text);
+        torchGeometry = torchMeshes.getIndexBuffers();
+        if (!torchGeometry || !torchGeometry.positions) {
+            throw new Error("Failed to generate buffers from OBJ model.");
+        }
+        //console.log("Teapot has geometry:", torchGeometry);
 
-        // Normalization logic, take from homework3
+        // Normalization logic
         const positions = torchGeometry.positions;
         if(positions.length > 0){
             const min = [positions[0], positions[1], positions[2]];
@@ -1186,8 +1183,76 @@ async function setupBallModel(url) {
     }
 }
 
+function setupShadowMapFBO() {
+    shadowMapFBO = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, shadowMapFBO);
+
+    shadowMapTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, shadowMapTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_SHORT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, shadowMapTexture, 0);
+
+    const unusedColorTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, unusedColorTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, unusedColorTexture, 0);
+
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        throw new Error("Shadow map FBO is not complete.");
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+function renderShadowMap() {
+    const lightProjection = mat4.create();
+    const orthoSize = poolDimension / 2 + 5.0;
+    mat4.ortho(lightProjection, -orthoSize, orthoSize, -orthoSize, orthoSize, 1.0, 50.0);
+
+    const lightView = mat4.create();
+    const lightPos = vec3.create();
+    vec3.scale(lightPos, shadowLightDir, -20.0);
+    mat4.lookAt(lightView, lightPos, [0, 0, 0], [0, 1, 0]);
+
+    mat4.multiply(lightSpaceMatrix, lightProjection, lightView);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, shadowMapFBO);
+    gl.viewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+    gl.clear(gl.DEPTH_BUFFER_BIT); 
+
+    gl.useProgram(shadowProgram);
+    gl.uniformMatrix4fv(shadowUniforms.lightSpaceMatrix, false, lightSpaceMatrix);
+    if (physicsBall && physicsBall.buffers.vbo) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, physicsBall.buffers.vbo);
+        gl.vertexAttribPointer(shadowAttribs.position, 3, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(shadowAttribs.position);
+        gl.drawArrays(gl.TRIANGLES, 0, physicsBall.buffers.numVertices);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+function playSoundEffect(sound) {
+    if (dropSound && sound == 'drop') {
+        dropSound.currentTime = 0; 
+        dropSound.play().catch(error => {
+            console.log("Audio blocked.", error);
+        });
+    }
+    if (waveSound && sound == 'wave') {
+        waveSound.currentTime = 0; 
+        waveSound.play().catch(error => {
+            console.log("Audio blocked.", error);
+        });
+    }
+}
+
 //Start application
 main().catch(error => {
-    console.error("Errore durante l'inizializzazione dell'applicazione:", error);
-    alert("Si è verificato un errore critico. Controlla la console per i dettagli.");
+    console.error("Critical error during inizializzation:", error);
+    alert("Critical error! Check console for more details");
 });
+

@@ -84,7 +84,7 @@ The project will now proceed to the next planned features:
    - stiffness;
    - damping.
 
--   **Step 4: swimming pool:** add a recessed "pool" area and a simple, procedurally animated character that can swim in it.
+
 
 ## How to Run
 
@@ -103,4 +103,8 @@ The project will now proceed to the next planned features:
 # References
 [Source 1] https://www.w3schools.com/colors/colors_converter.asp (colour converter, from hex to rgb)
 
-[Source 2] TO RECOVER (image for the skybox)
+[Source 2] https://www.nutty.ca/webgl/skygen/ (image for the skybox)
+
+[Source 3] https://freesound.org/people/velkstar/sounds/425209/ (wave sound)
+
+[Source 4] https://freesound.org/people/jorickhoofd/sounds/160118/ (dropping ball sound)

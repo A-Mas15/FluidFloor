@@ -18,7 +18,7 @@ class PhysicsBall {
     }
 
     setMesh(objdef) {
-        this.mesh = new ObjMesh();
+        this.mesh = new Objects();
         this.mesh.parse(objdef);
         this.mesh.computeNormals();
         const box = this.mesh.getBoundingBox();
